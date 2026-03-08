@@ -89,6 +89,19 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(db.get_latest_entry("part1/project.md", "exercise").id, guided.id)
             db.close()
 
+    def test_delete_entry_removes_row(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "progress.db")
+            exercise = build_exercise("part1/a.md", "exercise")
+            entry = db.resolve_entry_for_exercise(exercise, "freewrite")
+
+            db.delete_entry(entry.id)
+
+            self.assertEqual(db.list_history("part1/a.md", "freewrite"), [])
+            with self.assertRaises(KeyError):
+                db.get_entry_by_id(entry.id)
+            db.close()
+
     def test_migrates_legacy_rows_to_freewrite(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "progress.db"
