@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gbtw"
+version = "0.1.0"
+description = "Getting Back to Writing - a focused Textual writing course TUI"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "textual>=0.47",
+  "markdown-it-py",
+  "python-frontmatter",
+]
+
+[project.scripts]
+gbtw = "gbtw.main:run"
+
+[tool.setuptools.packages.find]
+include = ["gbtw*"]
