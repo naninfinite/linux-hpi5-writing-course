@@ -157,6 +157,12 @@ class HistoryScreen(ModalScreen[EntryRecord | None]):
                 yield OptionList(*options, id="history-list")
             yield Button("Close", id="history-close")
 
+    def on_mount(self) -> None:
+        if self.entries:
+            self.query_one("#history-list", OptionList).focus()
+        else:
+            self.query_one("#history-close", Button).focus()
+
     def action_dismiss_screen(self) -> None:
         self.dismiss(None)
 
@@ -195,6 +201,7 @@ class ExerciseListScreen(ModalScreen[str | None]):
 
     def on_mount(self) -> None:
         self._refresh_options()
+        self.query_one("#exercise-list", OptionList).focus()
 
     def action_dismiss_screen(self) -> None:
         self.dismiss(None)
