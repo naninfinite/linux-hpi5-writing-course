@@ -21,11 +21,13 @@ _MARKDOWN_PARSER = MarkdownIt("commonmark")
 _PSEUDO_TABLE_SEPARATOR_RE = re.compile(r"^(\s*-{3,})\s+(-{3,}\s*)$")
 _HORIZONTAL_RULE_RE = re.compile(r"^\s*---+\s*$")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+_HEADING_LINE_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*$")
 _UNORDERED_LIST_RE = re.compile(r"^(\s{0,3}[-+*]\s+)(.*)$")
-_ORDERED_LIST_RE = re.compile(r"^(\s{0,3}\d+\.\s+)(.*)$")
+_ORDERED_LIST_RE = re.compile(r"^(\s{0,3}\d+\\?\.\s+)(.*)$")
 _BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?")
 _BOX_TABLE_BORDER_RE = re.compile(r"^\+-{3,}\+\s*$")
 _BOX_TABLE_ROW_RE = re.compile(r"^\|(.*)\|\s*$")
+_GUIDED_SECTION_RE = re.compile(r"\b(question|questions|prompt|prompts)\b", re.IGNORECASE)
 
 
 @dataclass(slots=True, frozen=True)
@@ -39,6 +41,7 @@ class Exercise:
     status: str
     save_mode: str | None
     body: str
+    guided_questions: tuple[str, ...]
 
     @property
     def is_long_term(self) -> bool:
@@ -196,6 +199,7 @@ def _load_exercise(markdown_file: Path, content_root: Path) -> Exercise:
         if save_mode not in {"session", "project"}:
             raise ValueError(f"invalid save_mode {save_mode!r}")
     exercise_id = markdown_file.relative_to(content_root).as_posix()
+    normalized_body = _normalize_markdown_content(content)
     return Exercise(
         exercise_id=exercise_id,
         source_path=markdown_file,
@@ -205,7 +209,8 @@ def _load_exercise(markdown_file: Path, content_root: Path) -> Exercise:
         type=exercise_type,
         status=status,
         save_mode=save_mode,
-        body=_normalize_markdown_content(content),
+        body=normalized_body,
+        guided_questions=_extract_guided_questions(normalized_body),
     )
 
 
@@ -243,6 +248,39 @@ def _normalize_markdown_content(markdown_text: str) -> str:
     lines = _collapse_repeated_horizontal_rules(lines)
     lines = _collapse_blank_runs(lines)
     return "\n".join(lines).strip()
+
+
+def _extract_guided_questions(markdown_text: str) -> tuple[str, ...]:
+    if not markdown_text.strip():
+        return ()
+    questions: list[str] = []
+    section_level: int | None = None
+    for line in markdown_text.splitlines():
+        heading = _parse_heading_line(line)
+        if heading is not None:
+            level, title = heading
+            if section_level is not None and level <= section_level:
+                section_level = None
+            if _GUIDED_SECTION_RE.search(title):
+                section_level = level
+            continue
+        if section_level is None:
+            continue
+        list_match = _UNORDERED_LIST_RE.match(line) or _ORDERED_LIST_RE.match(line)
+        if list_match is None:
+            continue
+        candidate = list_match.group(2).strip()
+        if candidate.endswith("?"):
+            questions.append(candidate)
+    return tuple(questions)
+
+
+def _parse_heading_line(line: str) -> tuple[int, str] | None:
+    match = _HEADING_LINE_RE.match(line)
+    if match is None:
+        return None
+    title = re.sub(r"\s+#+\s*$", "", match.group(2)).strip()
+    return len(match.group(1)), title
 
 
 def _collapse_repeated_horizontal_rules(lines: list[str]) -> list[str]:
