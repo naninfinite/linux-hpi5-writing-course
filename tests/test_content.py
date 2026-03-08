@@ -103,6 +103,41 @@ type: reading
             "# Next section",
         )
 
+    def test_load_content_index_reflows_wrapped_paragraphs_and_list_items(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "part1").mkdir()
+            (root / "part1" / "wrapped.md").write_text(
+                """---
+title: Wrapped
+part: 1
+module: Start
+type: reading
+---
+
+This is a paragraph that was exported with hard line breaks
+even though it should read as one normal paragraph in the app.
+
+- This list item was also wrapped by the source export
+  and should read as a single bullet line.
+
+## Heading
+
+Another wrapped paragraph
+that should reflow cleanly.
+""",
+                encoding="utf-8",
+            )
+            index = load_content_index(root)
+
+        self.assertEqual(
+            index.exercises[0].body,
+            "This is a paragraph that was exported with hard line breaks even though it should read as one normal paragraph in the app.\n\n"
+            "- This list item was also wrapped by the source export and should read as a single bullet line.\n\n"
+            "## Heading\n\n"
+            "Another wrapped paragraph that should reflow cleanly.",
+        )
+
     def test_render_markdown_fallback_extracts_text(self) -> None:
         output = render_markdown_fallback("# Heading\n\n- **One**\n- Two\n\n`code`")
         self.assertIn("Heading", output)
