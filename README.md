@@ -20,7 +20,7 @@ python3 -m unittest discover -s tests
 Use this on the target Ubuntu ARM64 box after a clean install:
 
 1. Launch with `.venv/bin/gbtw` and confirm the first screen is clean, responsive, and loads sample content.
-2. Switch through `Read`, `Side`, `Stack`, and `Write`; verify no pane flicker and correct focus behavior.
+2. Switch through `Read`, `Side`, `Stack`, `Freewrite`, and `Exercise`; verify no pane flicker, correct focus behavior, and disabled `Exercise` states for content without guided questions.
 3. Use `[` and `]` in side mode; confirm the split cycles through `40/60`, `50/50`, and `60/40`.
 4. Type in the editor; confirm live word count updates and autosave changes `Unsaved •` to `Saved ✓` after idle time.
 5. Switch exercises with dirty text; confirm the current draft is preserved and the selected exercise restores its latest draft.
