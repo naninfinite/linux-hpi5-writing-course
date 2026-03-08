@@ -339,6 +339,79 @@ Body
             self.assertEqual(db.get_preference("last_split_ratio"), "50/50")
             db.close()
 
+    async def test_reading_exercises_disable_editor_layouts(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "reading.md").write_text(
+                """---
+title: Reading
+part: 1
+module: M
+type: reading
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+            app.current_layout_mode = "side"
+
+            await app._open_exercise_by_id("part1/reading.md", save_current=False)
+
+            self.assertTrue(app.editor.disabled)
+            self.assertEqual(app._effective_layout_mode(), "read")
+            self.assertEqual(app.focus_target, "exercise")
+
+            await app.action_set_mode("write")
+
+            self.assertEqual(app.current_layout_mode, "side")
+            self.assertEqual(app.bell_count, 1)
+            db.close()
+
+    async def test_writing_exercises_reenable_editor_layouts(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "reading.md").write_text(
+                """---
+title: Reading
+part: 1
+module: M
+type: reading
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            (root / "part1" / "exercise.md").write_text(
+                """---
+title: Exercise
+part: 1
+module: M
+type: exercise
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part1/reading.md", save_current=False)
+            await app._open_exercise_by_id("part1/exercise.md", save_current=False)
+            await app.action_set_mode("write")
+
+            self.assertFalse(app.editor.disabled)
+            self.assertEqual(app.current_layout_mode, "write")
+            self.assertEqual(app._effective_layout_mode(), "write")
+            self.assertEqual(app.focus_target, "editor")
+            db.close()
+
 
 if __name__ == "__main__":
     unittest.main()
