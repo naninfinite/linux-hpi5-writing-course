@@ -232,11 +232,13 @@ class ExerciseListScreen(ModalScreen[str | None]):
         for part, exercises in self.content_index.grouped_by_part(include_archived=self.show_archived).items():
             options.append(Option(f"Part {part}", id=f"header:{part}", disabled=True))
             current_module: str | None = None
+            module_index = 0
             for exercise in exercises:
                 if exercise.module != current_module:
                     current_module = exercise.module
+                    module_index += 1
                     options.append(
-                        Option(f"  {current_module}", id=f"module:{part}:{current_module}", disabled=True)
+                        Option(f"  {current_module}", id=f"module:{part}:{module_index}", disabled=True)
                     )
                 marker = " [optional]" if exercise.status == "optional" else ""
                 archived = " [archived]" if exercise.status == "archived" else ""
