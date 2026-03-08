@@ -138,6 +138,44 @@ that should reflow cleanly.
             "Another wrapped paragraph that should reflow cleanly.",
         )
 
+    def test_load_content_index_rewrites_ascii_box_reading_list_blocks(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "part1").mkdir()
+            (root / "part1" / "reading.md").write_text(
+                """---
+title: Reading
+part: 1
+module: List
+type: reading
+---
+
+**Novels**
+
++----------------------------------+
+| **Book Title** *by Author Name*  |
+|                                  |
+| **Weeks 1--2** *Library copy*    |
+|                                  |
+| This description was exported    |
+| with hard line breaks.           |
+|                                  |
+| **What to watch for:** *Notice*  |
++----------------------------------+
+""",
+                encoding="utf-8",
+            )
+            index = load_content_index(root)
+
+        self.assertEqual(
+            index.exercises[0].body,
+            "**Novels**\n\n"
+            "**Book Title** *by Author Name*\n\n"
+            "**Weeks 1--2** *Library copy*\n\n"
+            "This description was exported with hard line breaks.\n\n"
+            "**What to watch for:** *Notice*",
+        )
+
     def test_render_markdown_fallback_extracts_text(self) -> None:
         output = render_markdown_fallback("# Heading\n\n- **One**\n- Two\n\n`code`")
         self.assertIn("Heading", output)
