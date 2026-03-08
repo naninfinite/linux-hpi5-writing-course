@@ -9,6 +9,7 @@ description = "Getting Back to Writing - a focused Textual writing course TUI"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "rich",
   "textual>=0.47",
   "markdown-it-py",
   "python-frontmatter",
