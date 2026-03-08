@@ -64,6 +64,43 @@ Body
         self.assertEqual(index.exercises, ())
         self.assertEqual(len(index.warnings), 1)
 
+    def test_load_content_index_extracts_guided_questions_from_question_sections_only(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "part1").mkdir()
+            (root / "part1" / "questions.md").write_text(
+                """---
+title: Questions
+part: 1
+module: Start
+type: exercise
+---
+
+## World notes
+
+- Who owns this district?
+
+## Reflection questions
+
+1\\. What kind of cyberpunk world am I drawn to write?
+2\\. What human cost am I most interested in exploring?
+
+## Closing
+
+What else might matter here?
+""",
+                encoding="utf-8",
+            )
+            index = load_content_index(root)
+
+        self.assertEqual(
+            index.exercises[0].guided_questions,
+            (
+                "What kind of cyberpunk world am I drawn to write?",
+                "What human cost am I most interested in exploring?",
+            ),
+        )
+
     def test_load_content_index_normalizes_pseudo_table_intro_blocks(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
