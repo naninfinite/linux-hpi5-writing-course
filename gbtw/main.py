@@ -289,7 +289,11 @@ class ExerciseListScreen(ModalScreen[str | None]):
 
 
 class FooterControl(Static):
-    can_focus = False
+    can_focus = True
+    BINDINGS = [
+        Binding("enter", "activate", show=False),
+        Binding("space", "activate", show=False),
+    ]
 
     class Pressed(Message):
         def __init__(self, control_id: str) -> None:
@@ -304,12 +308,15 @@ class FooterControl(Static):
         self._is_disabled = disabled
         self.set_class(disabled, "disabled")
 
-    def on_click(self, event: events.Click) -> None:
-        event.stop()
+    def action_activate(self) -> None:
         if self._is_disabled:
             return
         if self.id is not None:
             self.post_message(self.Pressed(self.id))
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.action_activate()
 
 
 class GBTWApp(App[None]):
@@ -458,6 +465,10 @@ class GBTWApp(App[None]):
         margin-right: 0;
         color: #dad7d2;
         background: transparent;
+    }
+
+    .footer-control:focus {
+        background: #2a3339;
     }
 
     .footer-control.active-mode {
