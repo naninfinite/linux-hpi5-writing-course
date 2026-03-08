@@ -9,12 +9,14 @@ from .content import Exercise
 
 APP_DATA_DIR = Path.home() / ".local" / "share" / "gbtw"
 DB_PATH = APP_DATA_DIR / "progress.db"
+DEFAULT_DRAFT_KIND = "freewrite"
 
 
 @dataclass(slots=True, frozen=True)
 class EntryRecord:
     id: int
     exercise_id: str
+    draft_kind: str
     created_at: datetime
     updated_at: datetime
     content: str
@@ -37,6 +39,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS entries(
               id INTEGER PRIMARY KEY,
               exercise_id TEXT NOT NULL,
+              draft_kind TEXT NOT NULL DEFAULT 'freewrite',
               created_at TIMESTAMP NOT NULL,
               updated_at TIMESTAMP NOT NULL,
               content TEXT NOT NULL
@@ -46,6 +49,28 @@ class Database:
               key TEXT PRIMARY KEY,
               value TEXT NOT NULL
             );
+            """
+        )
+        entry_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(entries)").fetchall()
+        }
+        if "draft_kind" not in entry_columns:
+            self.connection.execute(
+                "ALTER TABLE entries ADD COLUMN draft_kind TEXT NOT NULL DEFAULT 'freewrite'"
+            )
+        self.connection.execute(
+            """
+            UPDATE entries
+            SET draft_kind = ?
+            WHERE draft_kind IS NULL OR draft_kind = ''
+            """,
+            (DEFAULT_DRAFT_KIND,),
+        )
+        self.connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_entries_exercise_kind_updated
+            ON entries(exercise_id, draft_kind, updated_at, id)
             """
         )
         self.connection.commit()
@@ -71,28 +96,30 @@ class Database:
     def resolve_entry_for_exercise(
         self,
         exercise: Exercise,
+        draft_kind: str,
         *,
         now: datetime | None = None,
     ) -> EntryRecord:
         now = now or datetime.now().astimezone()
         if exercise.is_long_term:
             if exercise.save_mode == "session":
-                record = self.get_latest_entry_for_local_day(exercise.exercise_id, now.date())
+                record = self.get_latest_entry_for_local_day(exercise.exercise_id, draft_kind, now.date())
                 if record is not None:
                     return record
-                return self.create_entry(exercise.exercise_id, "", now=now)
-            record = self.get_latest_entry(exercise.exercise_id)
+                return self.create_entry(exercise.exercise_id, draft_kind, "", now=now)
+            record = self.get_latest_entry(exercise.exercise_id, draft_kind)
             if record is not None:
                 return record
-            return self.create_entry(exercise.exercise_id, "", now=now)
-        record = self.get_latest_entry(exercise.exercise_id)
+            return self.create_entry(exercise.exercise_id, draft_kind, "", now=now)
+        record = self.get_latest_entry(exercise.exercise_id, draft_kind)
         if record is not None:
             return record
-        return self.create_entry(exercise.exercise_id, "", now=now)
+        return self.create_entry(exercise.exercise_id, draft_kind, "", now=now)
 
     def create_entry(
         self,
         exercise_id: str,
+        draft_kind: str,
         content: str,
         *,
         now: datetime | None = None,
@@ -100,10 +127,10 @@ class Database:
         now = _normalize_datetime(now)
         cursor = self.connection.execute(
             """
-            INSERT INTO entries(exercise_id, created_at, updated_at, content)
-            VALUES(?, ?, ?, ?)
+            INSERT INTO entries(exercise_id, draft_kind, created_at, updated_at, content)
+            VALUES(?, ?, ?, ?, ?)
             """,
-            (exercise_id, now.isoformat(), now.isoformat(), content),
+            (exercise_id, draft_kind, now.isoformat(), now.isoformat(), content),
         )
         self.connection.commit()
         return self.get_entry_by_id(int(cursor.lastrowid))
@@ -126,7 +153,7 @@ class Database:
     def get_entry_by_id(self, entry_id: int) -> EntryRecord:
         row = self.connection.execute(
             """
-            SELECT id, exercise_id, created_at, updated_at, content
+            SELECT id, exercise_id, draft_kind, created_at, updated_at, content
             FROM entries
             WHERE id = ?
             """,
@@ -136,28 +163,28 @@ class Database:
             raise KeyError(f"entry {entry_id} not found")
         return _row_to_entry(row)
 
-    def get_latest_entry(self, exercise_id: str) -> EntryRecord | None:
+    def get_latest_entry(self, exercise_id: str, draft_kind: str) -> EntryRecord | None:
         row = self.connection.execute(
             """
-            SELECT id, exercise_id, created_at, updated_at, content
+            SELECT id, exercise_id, draft_kind, created_at, updated_at, content
             FROM entries
-            WHERE exercise_id = ?
+            WHERE exercise_id = ? AND draft_kind = ?
             ORDER BY datetime(updated_at) DESC, id DESC
             LIMIT 1
             """,
-            (exercise_id,),
+            (exercise_id, draft_kind),
         ).fetchone()
         return None if row is None else _row_to_entry(row)
 
-    def get_latest_entry_for_local_day(self, exercise_id: str, local_day: date) -> EntryRecord | None:
+    def get_latest_entry_for_local_day(self, exercise_id: str, draft_kind: str, local_day: date) -> EntryRecord | None:
         rows = self.connection.execute(
             """
-            SELECT id, exercise_id, created_at, updated_at, content
+            SELECT id, exercise_id, draft_kind, created_at, updated_at, content
             FROM entries
-            WHERE exercise_id = ?
+            WHERE exercise_id = ? AND draft_kind = ?
             ORDER BY datetime(updated_at) DESC, id DESC
             """,
-            (exercise_id,),
+            (exercise_id, draft_kind),
         ).fetchall()
         for row in rows:
             entry = _row_to_entry(row)
@@ -165,15 +192,15 @@ class Database:
                 return entry
         return None
 
-    def list_history(self, exercise_id: str) -> list[EntryRecord]:
+    def list_history(self, exercise_id: str, draft_kind: str) -> list[EntryRecord]:
         rows = self.connection.execute(
             """
-            SELECT id, exercise_id, created_at, updated_at, content
+            SELECT id, exercise_id, draft_kind, created_at, updated_at, content
             FROM entries
-            WHERE exercise_id = ?
+            WHERE exercise_id = ? AND draft_kind = ?
             ORDER BY datetime(updated_at) DESC, id DESC
             """,
-            (exercise_id,),
+            (exercise_id, draft_kind),
         ).fetchall()
         return [_row_to_entry(row) for row in rows]
 
@@ -190,6 +217,7 @@ def _row_to_entry(row: sqlite3.Row) -> EntryRecord:
     return EntryRecord(
         id=int(row["id"]),
         exercise_id=str(row["exercise_id"]),
+        draft_kind=str(row["draft_kind"]),
         created_at=datetime.fromisoformat(str(row["created_at"])),
         updated_at=datetime.fromisoformat(str(row["updated_at"])),
         content=str(row["content"]),
