@@ -173,6 +173,15 @@ class Database:
         self.connection.commit()
         return self.get_entry_by_id(entry_id)
 
+    def delete_entry(self, entry_id: int) -> None:
+        cursor = self.connection.execute(
+            "DELETE FROM entries WHERE id = ?",
+            (entry_id,),
+        )
+        self.connection.commit()
+        if cursor.rowcount == 0:
+            raise KeyError(f"entry {entry_id} not found")
+
     def get_entry_by_id(self, entry_id: int) -> EntryRecord:
         row = self.connection.execute(
             """
