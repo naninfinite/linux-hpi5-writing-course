@@ -64,6 +64,43 @@ Body
         self.assertEqual(index.exercises, ())
         self.assertEqual(len(index.warnings), 1)
 
+    def test_first_available_skips_archived_exercises(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "part1").mkdir()
+            (root / "part1" / "archived.md").write_text(
+                """---
+title: Archived
+part: 1
+module: Start
+type: reading
+status: archived
+---
+
+Old content
+""",
+                encoding="utf-8",
+            )
+            (root / "part1" / "active.md").write_text(
+                """---
+title: Active
+part: 1
+module: Start
+type: exercise
+status: active
+---
+
+Current content
+""",
+                encoding="utf-8",
+            )
+            index = load_content_index(root)
+
+        first = index.first_available()
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertEqual(first.exercise_id, "part1/active.md")
+
     def test_load_content_index_extracts_guided_questions_from_question_sections_only(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
