@@ -283,27 +283,9 @@ class GBTWApp(App[None]):
         height: 1fr;
     }
 
-    #writing-pane {
-        layout: vertical;
-    }
-
     #editor {
         height: 1fr;
         background: #0f1519;
-    }
-
-    #editor-status {
-        height: auto;
-        dock: bottom;
-        align-horizontal: right;
-        padding: 0 1;
-        background: #151b1f;
-        color: #d7d7d7;
-        border-top: solid #2a3238;
-    }
-
-    #editor-status Label {
-        margin-left: 2;
     }
 
     #bottom-bar {
@@ -321,6 +303,16 @@ class GBTWApp(App[None]):
 
     #left-buttons {
         width: 1fr;
+    }
+
+    #status-strip {
+        width: auto;
+        height: auto;
+        align-horizontal: right;
+    }
+
+    #status-strip Label {
+        margin-left: 2;
     }
 
     Button {
@@ -448,9 +440,6 @@ class GBTWApp(App[None]):
                     yield Static("", id="exercise-fallback-view")
             with Container(id="writing-pane"):
                 yield TextArea("", id="editor")
-                with Horizontal(id="editor-status"):
-                    yield Label("Word count: 0", id="word-count")
-                    yield Label("Saved ✓", id="save-indicator", classes="saved")
         with Horizontal(id="bottom-bar"):
             with Horizontal(id="left-buttons", classes="button-row"):
                 yield FooterControl("Read", control_id="mode-read")
@@ -461,6 +450,9 @@ class GBTWApp(App[None]):
                 yield FooterControl("<", control_id="previous-exercise")
                 yield FooterControl(">", control_id="next-exercise")
                 yield FooterControl("?", control_id="help-button")
+            with Horizontal(id="status-strip"):
+                yield Label("Word count: 0", id="word-count")
+                yield Label("Saved ✓", id="save-indicator", classes="saved")
 
     async def on_mount(self) -> None:
         self.title = "gbtw"
