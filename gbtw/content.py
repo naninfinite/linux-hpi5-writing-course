@@ -53,11 +53,14 @@ class ContentIndex:
     exercises: tuple[Exercise, ...]
     warnings: tuple[str, ...]
 
+    def visible_exercises(self, include_archived: bool = False) -> tuple[Exercise, ...]:
+        if include_archived:
+            return self.exercises
+        return tuple(exercise for exercise in self.exercises if exercise.status != "archived")
+
     def grouped_by_part(self, include_archived: bool = False) -> dict[int, list[Exercise]]:
         grouped: dict[int, list[Exercise]] = {}
-        for exercise in self.exercises:
-            if exercise.status == "archived" and not include_archived:
-                continue
+        for exercise in self.visible_exercises(include_archived=include_archived):
             grouped.setdefault(exercise.part, []).append(exercise)
         return grouped
 
@@ -68,7 +71,8 @@ class ContentIndex:
         return None
 
     def first_available(self) -> Exercise | None:
-        return self.exercises[0] if self.exercises else None
+        visible = self.visible_exercises()
+        return visible[0] if visible else None
 
 
 def ensure_content_directories(content_root: Path = CONTENT_ROOT) -> None:
