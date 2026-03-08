@@ -18,17 +18,18 @@ from textual.widgets import Button, Input, Label, MarkdownViewer, OptionList, St
 from textual.widgets.option_list import Option
 
 from .content import ContentIndex, Exercise, load_content_index
-from .db import Database, EntryRecord
+from .db import Database, EntryRecord, ProjectEntryRecord
 
 SIDE_RATIOS: tuple[tuple[int, int], ...] = ((40, 60), (50, 50), (60, 40))
-LAYOUTS = {"read", "side", "stack", "freewrite", "exercise"}
-WRITING_LAYOUTS = {"side", "stack", "freewrite", "exercise"}
+LAYOUTS = {"read", "side", "stack", "freewrite", "exercise", "project"}
+WRITING_LAYOUTS = {"side", "stack", "freewrite", "exercise", "project"}
 SHORTCUT_TEXT = """\
 F1  Reading mode
 F2  Side split
 F3  Stack split
 F4  Freewrite mode
 F5  Exercise mode
+F6  Project mode
 
 [   decrease split ratio
 ]   increase split ratio
@@ -39,7 +40,7 @@ Ctrl+S  save
 Ctrl+J  start new long-term session now
 
 Ctrl+E  exercise list
-Ctrl+H  history modal (current section)
+Ctrl+H  history modal (current section or project)
 Ctrl+T  timed writing sprint modal
 
 Tab     switch focus between panes
@@ -73,7 +74,7 @@ def word_count(text: str) -> int:
     return len([word for word in text.split() if word.strip()])
 
 
-def format_entry_label(entry: EntryRecord) -> str:
+def format_entry_label(entry: EntryRecord | ProjectEntryRecord) -> str:
     timestamp = entry.updated_at.astimezone().strftime("%Y-%m-%d %H:%M")
     preview = entry.content.strip().splitlines()[0] if entry.content.strip() else "(empty)"
     return f"{timestamp}  {preview[:60]}"
@@ -99,7 +100,7 @@ class HelpScreen(ModalScreen[None]):
 class EntryPreviewScreen(ModalScreen[None]):
     BINDINGS = [Binding("escape", "dismiss_screen", "Close", show=False)]
 
-    def __init__(self, entry: EntryRecord) -> None:
+    def __init__(self, entry: EntryRecord | ProjectEntryRecord) -> None:
         super().__init__()
         self.entry = entry
 
@@ -160,17 +161,17 @@ class SprintScreen(ModalScreen[int | None]):
             self.dismiss(None)
 
 
-class HistoryScreen(ModalScreen[EntryRecord | None]):
+class HistoryScreen(ModalScreen[EntryRecord | ProjectEntryRecord | None]):
     BINDINGS = [Binding("escape", "dismiss_screen", "Close", show=False)]
 
-    def __init__(self, exercise: Exercise, entries: list[EntryRecord]) -> None:
+    def __init__(self, title: str, entries: list[EntryRecord | ProjectEntryRecord]) -> None:
         super().__init__()
-        self.exercise = exercise
+        self.title = title
         self.entries = entries
 
     def compose(self) -> ComposeResult:
         with Container(id="modal", classes="wide-modal"):
-            yield Static(f"History: {self.exercise.title}", classes="modal-title")
+            yield Static(f"History: {self.title}", classes="modal-title")
             if not self.entries:
                 yield Static("No saved entries yet.", id="history-empty")
             else:
@@ -564,6 +565,7 @@ class GBTWApp(App[None]):
         Binding("f3", "set_mode('stack')", "Stack", show=False),
         Binding("f4", "set_mode('freewrite')", "Freewrite", show=False),
         Binding("f5", "set_mode('exercise')", "Exercise", show=False),
+        Binding("f6", "set_mode('project')", "Project", show=False),
         Binding("[", "decrease_split", "Split -", show=False),
         Binding("]", "increase_split", "Split +", show=False),
         Binding("ctrl+n", "next_exercise", "Next", show=False),
@@ -627,6 +629,7 @@ class GBTWApp(App[None]):
                 yield FooterControl("Stack", control_id="mode-stack")
                 yield FooterControl("Freewrite", control_id="mode-freewrite")
                 yield FooterControl("Exercise", control_id="mode-exercise")
+                yield FooterControl("Project", control_id="mode-project")
                 yield Static("|")
                 yield FooterControl("Exercises", control_id="show-exercises")
                 yield FooterControl("<", control_id="previous-exercise")
@@ -652,24 +655,14 @@ class GBTWApp(App[None]):
         if not self._can_use_mode(mode):
             self.bell()
             return
-        previous_draft_kind = self._current_draft_kind()
+        previous_slot = self._current_editor_slot()
         assert self.database is not None
         self.current_layout_mode = mode
         self.database.set_preference("last_mode", self.current_layout_mode)
-        if (
-            self.current_exercise is not None
-            and self._exercise_supports_writing(self.current_exercise)
-            and previous_draft_kind != self._current_draft_kind()
-        ):
+        if self.current_exercise is not None and previous_slot != self._current_editor_slot():
             if self._is_dirty():
                 await self._save_current_entry("switch")
-            self._load_entry_into_editor(
-                self.current_exercise,
-                self._resolve_entry_for_exercise(
-                    self.current_exercise,
-                    self._current_draft_kind(),
-                ),
-            )
+            self._load_editor_for_exercise(self.current_exercise)
         self._apply_layout()
         if self._effective_layout_mode() == "read":
             self._focus_exercise()
@@ -707,6 +700,9 @@ class GBTWApp(App[None]):
         await self._create_new_freewrite_draft()
 
     async def action_new_session_now(self) -> None:
+        if self._effective_layout_mode() == "project":
+            self.bell()
+            return
         if self.current_exercise is None or not self.current_exercise.is_long_term:
             self.bell()
             return
@@ -725,30 +721,40 @@ class GBTWApp(App[None]):
         )
 
     async def action_show_history(self) -> None:
-        if self.current_exercise is None or not self.current_exercise.is_long_term:
+        if self.current_exercise is None:
             self.bell()
             return
         assert self.database is not None
+        if self._effective_layout_mode() == "project" and self._project_mode_available(self.current_exercise):
+            entries = self.database.list_project_history(self.current_exercise.project_key or "")
+            self.push_screen(
+                HistoryScreen(self._project_title_for(self.current_exercise), entries),
+                callback=self._on_history_closed,
+            )
+            return
+        if not self.current_exercise.is_long_term:
+            self.bell()
+            return
         entries = self.database.list_history(
             self.current_exercise.exercise_id,
             self._current_draft_kind(),
         )
         self.push_screen(
-            HistoryScreen(self.current_exercise, entries),
+            HistoryScreen(self.current_exercise.title, entries),
             callback=self._on_history_closed,
         )
 
     async def action_show_sprint(self) -> None:
-        if not self._can_write_current_exercise():
+        if not self._can_edit_current_target():
             self.bell()
             return
         self.push_screen(SprintScreen(), callback=self._on_sprint_closed)
 
     async def action_toggle_focus(self) -> None:
-        if not self._can_write_current_exercise():
+        if not self._can_edit_current_target():
             self._focus_exercise()
             return
-        if self._effective_layout_mode() in {"freewrite", "exercise"}:
+        if self._effective_layout_mode() in {"freewrite", "exercise", "project"}:
             self._focus_editor()
             return
         focused = self.focused
@@ -799,6 +805,8 @@ class GBTWApp(App[None]):
             await self.action_set_mode("freewrite")
         elif control_id == "mode-exercise":
             await self.action_set_mode("exercise")
+        elif control_id == "mode-project":
+            await self.action_set_mode("project")
         elif control_id == "show-exercises":
             await self.action_show_exercise_list()
         elif control_id == "previous-exercise":
@@ -851,21 +859,13 @@ class GBTWApp(App[None]):
         self.query_one("#exercise-title", Label).update("No exercises found")
         self.query_one("#exercise-meta", Label).update("Run install.sh to create sample content.")
         await self._update_exercise_markdown("# No exercises found\n\nRun install.sh to create sample content.")
-        editor = self.query_one("#editor", TextArea)
-        self._loading_editor = True
-        self._ignored_loaded_text = ""
-        editor.load_text("")
-        self._loading_editor = False
-        editor.disabled = True
-        self._set_save_indicator("Saved ✓", "saved")
-        self._update_word_count()
-        self._update_draft_controls()
+        self._load_disabled_editor()
 
     def _on_exercise_list_closed(self, selection: str | None) -> None:
         if selection:
             self.run_worker(self._open_exercise_by_id(selection), exclusive=False)
 
-    def _on_history_closed(self, selected: EntryRecord | None) -> None:
+    def _on_history_closed(self, selected: EntryRecord | ProjectEntryRecord | None) -> None:
         if selected is not None:
             self.push_screen(EntryPreviewScreen(selected))
 
@@ -898,8 +898,7 @@ class GBTWApp(App[None]):
         self.database.set_preference("last_exercise_id", target.exercise_id)
         self._update_exercise_header(target)
         await self._update_exercise_markdown(target.body)
-        record = self._resolve_entry_for_exercise(target, self._draft_kind_for_exercise(target))
-        self._load_entry_into_editor(target, record)
+        self._load_editor_for_exercise(target)
         self._update_bottom_bar()
         if self._effective_layout_mode(target) == "read":
             self._focus_exercise()
@@ -965,7 +964,7 @@ class GBTWApp(App[None]):
             writing_pane.display = False
             exercise_pane.styles.width = "100%"
             exercise_pane.styles.height = "100%"
-        elif layout_mode in {"freewrite", "exercise"}:
+        elif layout_mode in {"freewrite", "exercise", "project"}:
             workspace.styles.layout = "vertical"
             exercise_pane.display = False
             writing_pane.display = True
@@ -996,15 +995,19 @@ class GBTWApp(App[None]):
             "mode-stack": "stack",
             "mode-freewrite": "freewrite",
             "mode-exercise": "exercise",
+            "mode-project": "project",
         }
         effective_mode = self._effective_layout_mode()
-        can_write = self._can_write_current_exercise()
+        can_write = self._exercise_supports_writing(self.current_exercise)
         can_use_exercise_mode = self._exercise_mode_available(self.current_exercise)
+        can_use_project_mode = self._project_mode_available(self.current_exercise)
         for control_id, mode in mapping.items():
             control = self.query_one(f"#{control_id}", FooterControl)
             control.set_class(mode == effective_mode, "active-mode")
             if mode == "exercise":
                 control.set_disabled(not can_use_exercise_mode)
+            elif mode == "project":
+                control.set_disabled(not can_use_project_mode)
             elif mode in WRITING_LAYOUTS:
                 control.set_disabled(not can_write)
         self._update_word_count()
@@ -1015,19 +1018,33 @@ class GBTWApp(App[None]):
     def _exercise_mode_available(self, exercise: Exercise | None) -> bool:
         return self._exercise_supports_writing(exercise) and bool(exercise.guided_questions)
 
+    def _project_mode_available(self, exercise: Exercise | None) -> bool:
+        return exercise is not None and exercise.project_key is not None
+
     def _can_write_current_exercise(self) -> bool:
         return self._exercise_supports_writing(self.current_exercise)
+
+    def _can_edit_current_target(self) -> bool:
+        return self._effective_layout_mode() != "read"
 
     def _can_use_mode(self, mode: str, exercise: Exercise | None = None) -> bool:
         target = self.current_exercise if exercise is None else exercise
         if mode == "exercise":
             return self._exercise_mode_available(target)
+        if mode == "project":
+            return self._project_mode_available(target)
         if mode in WRITING_LAYOUTS:
             return self._exercise_supports_writing(target)
         return mode in LAYOUTS
 
     def _effective_layout_mode(self, exercise: Exercise | None = None) -> str:
         target = self.current_exercise if exercise is None else exercise
+        if self.current_layout_mode == "project":
+            if self._project_mode_available(target):
+                return "project"
+            if self._exercise_supports_writing(target):
+                return "freewrite"
+            return "read"
         if self.current_layout_mode == "exercise":
             if self._exercise_mode_available(target):
                 return "exercise"
@@ -1037,6 +1054,19 @@ class GBTWApp(App[None]):
         if self.current_layout_mode in WRITING_LAYOUTS and not self._exercise_supports_writing(target):
             return "read"
         return self.current_layout_mode
+
+    def _current_editor_slot(self, exercise: Exercise | None = None) -> tuple[str, str] | None:
+        target = self.current_exercise if exercise is None else exercise
+        if target is None:
+            return None
+        effective_mode = self._effective_layout_mode(target)
+        if effective_mode == "project" and target.project_key is not None:
+            return ("project", target.project_key)
+        if effective_mode == "exercise":
+            return ("exercise", "exercise")
+        if effective_mode in {"freewrite", "side", "stack", "read"} and self._exercise_supports_writing(target):
+            return ("exercise", "freewrite")
+        return None
 
     def _current_draft_kind(self) -> str:
         return self._draft_kind_for_exercise(self.current_exercise)
@@ -1075,13 +1105,52 @@ class GBTWApp(App[None]):
 
     def _can_manage_freewrite_drafts(self, exercise: Exercise | None = None) -> bool:
         target = self.current_exercise if exercise is None else exercise
-        return self._exercise_supports_writing(target) and self._draft_kind_for_exercise(target) == "freewrite"
+        return self._exercise_supports_writing(target) and self._effective_layout_mode(target) == "freewrite"
 
     def _current_freewrite_entries(self) -> list[EntryRecord]:
         if self.current_exercise is None or not self._can_manage_freewrite_drafts(self.current_exercise):
             return []
         assert self.database is not None
         return self.database.list_history(self.current_exercise.exercise_id, "freewrite")
+
+    def _project_title_for(self, exercise: Exercise) -> str:
+        return exercise.project_title or exercise.title
+
+    def _resolve_project_entry(self, exercise: Exercise) -> ProjectEntryRecord:
+        assert self.database is not None
+        assert exercise.project_key is not None
+        project_key = exercise.project_key
+        latest = self.database.get_latest_project_entry(project_key)
+        if latest is not None:
+            return latest
+        seed = self.content_index.project_seed(project_key)
+        if seed is not None:
+            seed_entries = self.database.list_history(seed.exercise_id, "freewrite")
+            if seed_entries:
+                self.database.seed_project_entries(project_key, seed_entries)
+        return self.database.resolve_project_entry(project_key)
+
+    def _load_editor_for_exercise(self, exercise: Exercise) -> None:
+        effective_mode = self._effective_layout_mode(exercise)
+        if effective_mode == "project" and self._project_mode_available(exercise):
+            self._load_project_entry_into_editor(self._resolve_project_entry(exercise))
+            return
+        if self._exercise_supports_writing(exercise):
+            self._load_entry_into_editor(exercise, self._resolve_entry_for_exercise(exercise, self._draft_kind_for_exercise(exercise)))
+            return
+        self._load_disabled_editor()
+
+    def _load_disabled_editor(self) -> None:
+        self.current_entry_id = None
+        editor = self.query_one("#editor", TextArea)
+        self._loading_editor = True
+        self._ignored_loaded_text = ""
+        editor.load_text("")
+        self._loading_editor = False
+        editor.disabled = True
+        self._set_save_indicator("Saved ✓", "saved")
+        self._update_word_count()
+        self._update_draft_controls()
 
     def _load_entry_into_editor(self, exercise: Exercise, record: EntryRecord) -> None:
         self.current_entry_id = record.id
@@ -1092,6 +1161,18 @@ class GBTWApp(App[None]):
         self._loading_editor = True
         self._ignored_loaded_text = loaded_text
         editor.load_text(loaded_text)
+        self._loading_editor = False
+        self._set_save_indicator("Saved ✓", "saved")
+        self._update_word_count()
+        self._update_draft_controls()
+
+    def _load_project_entry_into_editor(self, record: ProjectEntryRecord) -> None:
+        self.current_entry_id = record.id
+        editor = self.query_one("#editor", TextArea)
+        editor.disabled = False
+        self._loading_editor = True
+        self._ignored_loaded_text = record.content
+        editor.load_text(record.content)
         self._loading_editor = False
         self._set_save_indicator("Saved ✓", "saved")
         self._update_word_count()
@@ -1150,18 +1231,27 @@ class GBTWApp(App[None]):
         self._save_generation += 1
         generation = self._save_generation
         self._set_save_indicator("Saving…", "saving")
-        record = self.database.update_entry(self.current_entry_id, editor.text)
-        if generation != self._save_generation:
-            return
-        self.current_entry_id = record.id
-        if self.current_exercise is not None:
-            self._remember_active_entry(self.current_exercise, record)
+        if self._effective_layout_mode() == "project":
+            record = self.database.update_project_entry(self.current_entry_id, editor.text)
+            if generation != self._save_generation:
+                return
+            self.current_entry_id = record.id
+        else:
+            record = self.database.update_entry(self.current_entry_id, editor.text)
+            if generation != self._save_generation:
+                return
+            self.current_entry_id = record.id
+            if self.current_exercise is not None:
+                self._remember_active_entry(self.current_exercise, record)
         self._set_save_indicator("Saved ✓", "saved")
         self._update_draft_controls()
         if reason == "manual":
             self.set_timer(1.5, lambda: self.call_after_refresh(self._restore_saved_indicator))
 
     async def _create_new_session_entry(self) -> None:
+        if self._effective_layout_mode() == "project":
+            self.bell()
+            return
         if self._is_dirty():
             await self._save_current_entry("manual")
         if self.current_exercise is None:
@@ -1260,7 +1350,7 @@ class GBTWApp(App[None]):
             self.query_one("#exercise-markdown", MarkdownViewer).focus()
 
     def _start_sprint(self, seconds: int) -> None:
-        if not self._can_write_current_exercise():
+        if not self._can_edit_current_target():
             self.bell()
             return
         self._suppress_autosave = True
