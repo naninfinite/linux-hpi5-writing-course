@@ -20,6 +20,7 @@ from .db import Database, EntryRecord
 
 SIDE_RATIOS: tuple[tuple[int, int], ...] = ((40, 60), (50, 50), (60, 40))
 LAYOUTS = {"read", "side", "stack", "write"}
+WRITING_LAYOUTS = {"side", "stack", "write"}
 SHORTCUT_TEXT = """\
 F1  Reading mode
 F2  Side split
@@ -259,9 +260,16 @@ class FooterControl(Static):
 
     def __init__(self, label: str, *, control_id: str) -> None:
         super().__init__(label, id=control_id, classes="footer-control")
+        self._is_disabled = False
+
+    def set_disabled(self, disabled: bool) -> None:
+        self._is_disabled = disabled
+        self.set_class(disabled, "disabled")
 
     def on_click(self, event: events.Click) -> None:
         event.stop()
+        if self._is_disabled:
+            return
         if self.id is not None:
             self.post_message(self.Pressed(self.id))
 
@@ -312,10 +320,12 @@ class GBTWApp(App[None]):
 
     #exercise-markdown, #exercise-fallback {
         height: 1fr;
+        width: 100%;
     }
 
     #exercise-fallback-view {
-        height: 1fr;
+        width: 100%;
+        height: auto;
     }
 
     #editor {
@@ -368,6 +378,10 @@ class GBTWApp(App[None]):
         background: #d2c36b;
         color: #171717;
         text-style: bold;
+    }
+
+    .footer-control.disabled {
+        color: #6c757d;
     }
 
     Button.active-mode {
@@ -505,11 +519,16 @@ class GBTWApp(App[None]):
     async def action_set_mode(self, mode: str) -> None:
         if mode not in LAYOUTS:
             return
+        if mode in WRITING_LAYOUTS and not self._can_write_current_exercise():
+            self.bell()
+            return
         assert self.database is not None
         self.current_layout_mode = mode
         self.database.set_preference("last_mode", self.current_layout_mode)
         self._apply_layout()
-        if mode != "read":
+        if self._effective_layout_mode() == "read":
+            self._focus_exercise()
+        else:
             self._focus_editor()
 
     async def action_decrease_split(self) -> None:
@@ -563,9 +582,15 @@ class GBTWApp(App[None]):
         )
 
     async def action_show_sprint(self) -> None:
+        if not self._can_write_current_exercise():
+            self.bell()
+            return
         self.push_screen(SprintScreen(), callback=self._on_sprint_closed)
 
     async def action_toggle_focus(self) -> None:
+        if not self._can_write_current_exercise():
+            self._focus_exercise()
+            return
         focused = self.focused
         editor = self.query_one("#editor", TextArea)
         if focused is editor:
@@ -698,7 +723,7 @@ class GBTWApp(App[None]):
         record = self.database.resolve_entry_for_exercise(target)
         self.current_entry_id = record.id
         self._update_exercise_header(target)
-        self.query_one("#editor", TextArea).disabled = False
+        self.query_one("#editor", TextArea).disabled = not self._exercise_supports_writing(target)
         await self._update_exercise_markdown(target.body)
         self._loading_editor = True
         self._ignored_loaded_text = record.content
@@ -707,7 +732,9 @@ class GBTWApp(App[None]):
         self._set_save_indicator("Saved ✓", "saved")
         self._update_word_count()
         self._update_bottom_bar()
-        if self.current_layout_mode != "read":
+        if self._effective_layout_mode() == "read":
+            self._focus_exercise()
+        else:
             self._focus_editor()
 
     def _update_exercise_header(self, exercise: Exercise) -> None:
@@ -743,19 +770,20 @@ class GBTWApp(App[None]):
         exercise_pane = self.query_one("#exercise-pane", Container)
         writing_pane = self.query_one("#writing-pane", Container)
         ratio_left, ratio_right = SIDE_RATIOS[self.side_ratio_index]
-        if self.current_layout_mode == "read":
+        layout_mode = self._effective_layout_mode()
+        if layout_mode == "read":
             workspace.styles.layout = "vertical"
             exercise_pane.display = True
             writing_pane.display = False
             exercise_pane.styles.width = "100%"
             exercise_pane.styles.height = "100%"
-        elif self.current_layout_mode == "write":
+        elif layout_mode == "write":
             workspace.styles.layout = "vertical"
             exercise_pane.display = False
             writing_pane.display = True
             writing_pane.styles.width = "100%"
             writing_pane.styles.height = "100%"
-        elif self.current_layout_mode == "side":
+        elif layout_mode == "side":
             workspace.styles.layout = "horizontal"
             exercise_pane.display = True
             writing_pane.display = True
@@ -780,10 +808,25 @@ class GBTWApp(App[None]):
             "mode-stack": "stack",
             "mode-write": "write",
         }
+        effective_mode = self._effective_layout_mode()
+        can_write = self._can_write_current_exercise()
         for control_id, mode in mapping.items():
             control = self.query_one(f"#{control_id}", FooterControl)
-            control.set_class(mode == self.current_layout_mode, "active-mode")
+            control.set_class(mode == effective_mode, "active-mode")
+            if mode in WRITING_LAYOUTS:
+                control.set_disabled(not can_write)
         self._update_word_count()
+
+    def _exercise_supports_writing(self, exercise: Exercise | None) -> bool:
+        return exercise is not None and exercise.type != "reading"
+
+    def _can_write_current_exercise(self) -> bool:
+        return self.current_exercise is None or self._exercise_supports_writing(self.current_exercise)
+
+    def _effective_layout_mode(self) -> str:
+        if self.current_layout_mode in WRITING_LAYOUTS and not self._can_write_current_exercise():
+            return "read"
+        return self.current_layout_mode
 
     def _update_word_count(self) -> None:
         label = self.query_one("#word-count", Label)
@@ -872,6 +915,9 @@ class GBTWApp(App[None]):
             self.query_one("#exercise-markdown", MarkdownViewer).focus()
 
     def _start_sprint(self, seconds: int) -> None:
+        if not self._can_write_current_exercise():
+            self.bell()
+            return
         self._suppress_autosave = True
         self._sprint_seconds_remaining = seconds
         if self._sprint_timer is not None:
