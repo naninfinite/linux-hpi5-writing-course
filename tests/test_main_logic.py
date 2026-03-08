@@ -344,6 +344,107 @@ Body
             self.assertEqual(db.get_preference("last_split_ratio"), "50/50")
             db.close()
 
+    async def test_initial_load_skips_archived_last_exercise(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "archived.md").write_text(
+                """---
+title: Archived
+part: 1
+module: M
+type: reading
+status: archived
+---
+
+Old body
+""",
+                encoding="utf-8",
+            )
+            (root / "part1" / "active.md").write_text(
+                """---
+title: Active
+part: 1
+module: M
+type: exercise
+status: active
+---
+
+Current body
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            db.set_preference("last_exercise_id", "part1/archived.md")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._load_initial_exercise()
+
+            self.assertIsNotNone(app.current_exercise)
+            assert app.current_exercise is not None
+            self.assertEqual(app.current_exercise.exercise_id, "part1/active.md")
+            db.close()
+
+    async def test_next_previous_navigation_skips_archived_exercises(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "a.md").write_text(
+                """---
+title: First
+part: 1
+module: M
+type: exercise
+status: active
+---
+
+Body A
+""",
+                encoding="utf-8",
+            )
+            (root / "part1" / "archived.md").write_text(
+                """---
+title: Archived
+part: 1
+module: M
+type: reading
+status: archived
+---
+
+Old body
+""",
+                encoding="utf-8",
+            )
+            (root / "part1" / "b.md").write_text(
+                """---
+title: Second
+part: 1
+module: M
+type: exercise
+status: active
+---
+
+Body B
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part1/a.md", save_current=False)
+            await app.action_next_exercise()
+
+            self.assertIsNotNone(app.current_exercise)
+            assert app.current_exercise is not None
+            self.assertEqual(app.current_exercise.exercise_id, "part1/b.md")
+
+            await app.action_previous_exercise()
+
+            self.assertIsNotNone(app.current_exercise)
+            assert app.current_exercise is not None
+            self.assertEqual(app.current_exercise.exercise_id, "part1/a.md")
+            db.close()
+
     async def test_reading_exercises_disable_editor_layouts(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "content"
