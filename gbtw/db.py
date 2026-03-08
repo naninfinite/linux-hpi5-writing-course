@@ -22,6 +22,15 @@ class EntryRecord:
     content: str
 
 
+@dataclass(slots=True, frozen=True)
+class ProjectEntryRecord:
+    id: int
+    project_key: str
+    created_at: datetime
+    updated_at: datetime
+    content: str
+
+
 class Database:
     def __init__(self, path: Path = DB_PATH) -> None:
         self.path = path
@@ -49,6 +58,14 @@ class Database:
               key TEXT PRIMARY KEY,
               value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS project_entries(
+              id INTEGER PRIMARY KEY,
+              project_key TEXT NOT NULL,
+              created_at TIMESTAMP NOT NULL,
+              updated_at TIMESTAMP NOT NULL,
+              content TEXT NOT NULL
+            );
             """
         )
         entry_columns = {
@@ -71,6 +88,12 @@ class Database:
             """
             CREATE INDEX IF NOT EXISTS idx_entries_exercise_kind_updated
             ON entries(exercise_id, draft_kind, updated_at, id)
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_project_entries_key_updated
+            ON project_entries(project_key, updated_at, id)
             """
         )
         self.connection.commit()
@@ -204,6 +227,105 @@ class Database:
         ).fetchall()
         return [_row_to_entry(row) for row in rows]
 
+    def resolve_project_entry(
+        self,
+        project_key: str,
+        *,
+        now: datetime | None = None,
+    ) -> ProjectEntryRecord:
+        record = self.get_latest_project_entry(project_key)
+        if record is not None:
+            return record
+        return self.create_project_entry(project_key, "", now=now)
+
+    def create_project_entry(
+        self,
+        project_key: str,
+        content: str,
+        *,
+        now: datetime | None = None,
+        updated_at: datetime | None = None,
+    ) -> ProjectEntryRecord:
+        created_at = _normalize_datetime(now)
+        effective_updated_at = _normalize_datetime(updated_at or created_at)
+        cursor = self.connection.execute(
+            """
+            INSERT INTO project_entries(project_key, created_at, updated_at, content)
+            VALUES(?, ?, ?, ?)
+            """,
+            (project_key, created_at.isoformat(), effective_updated_at.isoformat(), content),
+        )
+        self.connection.commit()
+        return self.get_project_entry_by_id(int(cursor.lastrowid))
+
+    def update_project_entry(
+        self,
+        entry_id: int,
+        content: str,
+        *,
+        now: datetime | None = None,
+    ) -> ProjectEntryRecord:
+        updated_at = _normalize_datetime(now)
+        self.connection.execute(
+            "UPDATE project_entries SET content = ?, updated_at = ? WHERE id = ?",
+            (content, updated_at.isoformat(), entry_id),
+        )
+        self.connection.commit()
+        return self.get_project_entry_by_id(entry_id)
+
+    def get_project_entry_by_id(self, entry_id: int) -> ProjectEntryRecord:
+        row = self.connection.execute(
+            """
+            SELECT id, project_key, created_at, updated_at, content
+            FROM project_entries
+            WHERE id = ?
+            """,
+            (entry_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"project entry {entry_id} not found")
+        return _row_to_project_entry(row)
+
+    def get_latest_project_entry(self, project_key: str) -> ProjectEntryRecord | None:
+        row = self.connection.execute(
+            """
+            SELECT id, project_key, created_at, updated_at, content
+            FROM project_entries
+            WHERE project_key = ?
+            ORDER BY datetime(updated_at) DESC, id DESC
+            LIMIT 1
+            """,
+            (project_key,),
+        ).fetchone()
+        return None if row is None else _row_to_project_entry(row)
+
+    def list_project_history(self, project_key: str) -> list[ProjectEntryRecord]:
+        rows = self.connection.execute(
+            """
+            SELECT id, project_key, created_at, updated_at, content
+            FROM project_entries
+            WHERE project_key = ?
+            ORDER BY datetime(updated_at) DESC, id DESC
+            """,
+            (project_key,),
+        ).fetchall()
+        return [_row_to_project_entry(row) for row in rows]
+
+    def seed_project_entries(self, project_key: str, entries: list[EntryRecord]) -> list[ProjectEntryRecord]:
+        if self.list_project_history(project_key):
+            return self.list_project_history(project_key)
+        created: list[ProjectEntryRecord] = []
+        for entry in sorted(entries, key=lambda item: (item.updated_at, item.id)):
+            created.append(
+                self.create_project_entry(
+                    project_key,
+                    entry.content,
+                    now=entry.created_at,
+                    updated_at=entry.updated_at,
+                )
+            )
+        return self.list_project_history(project_key) if created else []
+
 
 def _normalize_datetime(value: datetime | None) -> datetime:
     if value is None:
@@ -218,6 +340,16 @@ def _row_to_entry(row: sqlite3.Row) -> EntryRecord:
         id=int(row["id"]),
         exercise_id=str(row["exercise_id"]),
         draft_kind=str(row["draft_kind"]),
+        created_at=datetime.fromisoformat(str(row["created_at"])),
+        updated_at=datetime.fromisoformat(str(row["updated_at"])),
+        content=str(row["content"]),
+    )
+
+
+def _row_to_project_entry(row: sqlite3.Row) -> ProjectEntryRecord:
+    return ProjectEntryRecord(
+        id=int(row["id"]),
+        project_key=str(row["project_key"]),
         created_at=datetime.fromisoformat(str(row["created_at"])),
         updated_at=datetime.fromisoformat(str(row["updated_at"])),
         content=str(row["content"]),
