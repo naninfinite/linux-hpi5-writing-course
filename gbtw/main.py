@@ -380,18 +380,39 @@ class GBTWApp(App[None]):
 
     #draft-toolbar {
         height: auto;
-        padding: 0 0 1 0;
+        padding: 0 0 0 0;
+        margin-bottom: 1;
         align-vertical: middle;
+        background: #131a1f;
+        border: solid #273139;
     }
 
     #draft-label {
         width: 1fr;
-        color: #aeb6bb;
+        color: #c4cdd2;
         padding: 0 1;
     }
 
     .draft-button {
-        min-width: 3;
+        min-width: 0;
+        height: auto;
+        margin-right: 0;
+        padding: 0 1;
+        color: #afbbc2;
+        background: transparent;
+        border: none;
+    }
+
+    .draft-button:hover {
+        background: #212b32;
+    }
+
+    #draft-delete {
+        color: #e1aaa4;
+    }
+
+    #draft-undo {
+        color: #9fc8a9;
     }
 
     #bottom-bar {
@@ -606,6 +627,7 @@ class GBTWApp(App[None]):
         self._using_markdown_fallback = False
         self._last_save_message = "Saved ✓"
         self._save_indicator_state = "saved"
+        self._last_deleted_freewrite: EntryRecord | None = None
 
     def compose(self) -> ComposeResult:
         with Container(id="workspace"):
@@ -620,14 +642,16 @@ class GBTWApp(App[None]):
                     yield Button("<", id="draft-prev", classes="draft-button")
                     yield Label("", id="draft-label")
                     yield Button(">", id="draft-next", classes="draft-button")
-                    yield Button("New Draft", id="draft-new", classes="draft-button")
+                    yield Button("New", id="draft-new", classes="draft-button")
+                    yield Button("Del", id="draft-delete", classes="draft-button")
+                    yield Button("Undo", id="draft-undo", classes="draft-button")
                 yield TextArea("", id="editor")
         with Horizontal(id="bottom-bar"):
             with Horizontal(id="left-buttons", classes="button-row"):
                 yield FooterControl("Read", control_id="mode-read")
                 yield FooterControl("Side", control_id="mode-side")
                 yield FooterControl("Stack", control_id="mode-stack")
-                yield FooterControl("Freewrite", control_id="mode-freewrite")
+                yield FooterControl("Write", control_id="mode-freewrite")
                 yield FooterControl("Exercise", control_id="mode-exercise")
                 yield FooterControl("Project", control_id="mode-project")
                 yield Static("|")
@@ -698,6 +722,12 @@ class GBTWApp(App[None]):
 
     async def action_new_draft(self) -> None:
         await self._create_new_freewrite_draft()
+
+    async def action_delete_draft(self) -> None:
+        await self._delete_current_freewrite_draft()
+
+    async def action_undo_delete_draft(self) -> None:
+        await self._undo_deleted_freewrite_draft()
 
     async def action_new_session_now(self) -> None:
         if self._effective_layout_mode() == "project":
@@ -791,6 +821,10 @@ class GBTWApp(App[None]):
             await self.action_next_draft()
         elif button_id == "draft-new":
             await self.action_new_draft()
+        elif button_id == "draft-delete":
+            await self.action_delete_draft()
+        elif button_id == "draft-undo":
+            await self.action_undo_delete_draft()
 
     @on(FooterControl.Pressed)
     async def on_footer_control_pressed(self, event: FooterControl.Pressed) -> None:
@@ -1113,6 +1147,14 @@ class GBTWApp(App[None]):
         assert self.database is not None
         return self.database.list_history(self.current_exercise.exercise_id, "freewrite")
 
+    def _can_undo_deleted_freewrite(self) -> bool:
+        return (
+            self._last_deleted_freewrite is not None
+            and self.current_exercise is not None
+            and self._can_manage_freewrite_drafts()
+            and self._last_deleted_freewrite.exercise_id == self.current_exercise.exercise_id
+        )
+
     def _project_title_for(self, exercise: Exercise) -> str:
         return exercise.project_title or exercise.title
 
@@ -1277,6 +1319,7 @@ class GBTWApp(App[None]):
             "freewrite",
             "",
         )
+        self._last_deleted_freewrite = None
         self._load_entry_into_editor(self.current_exercise, record)
         self._focus_editor()
 
@@ -1297,6 +1340,55 @@ class GBTWApp(App[None]):
         self._load_entry_into_editor(self.current_exercise, target)
         self._focus_editor()
 
+    async def _delete_current_freewrite_draft(self) -> None:
+        if self.current_exercise is None or not self._can_manage_freewrite_drafts():
+            self.bell()
+            return
+        if self.current_entry_id is None:
+            self.bell()
+            return
+        if self._is_dirty():
+            await self._save_current_entry("manual")
+        assert self.database is not None
+        deleted = self.database.get_entry_by_id(self.current_entry_id)
+        entries = self._current_freewrite_entries()
+        current_index = next((index for index, entry in enumerate(entries) if entry.id == deleted.id), -1)
+        if current_index < 0:
+            self.bell()
+            return
+        if len(entries) == 1:
+            replacement = self.database.create_entry(
+                self.current_exercise.exercise_id,
+                "freewrite",
+                "",
+            )
+        else:
+            replacement = entries[(current_index + 1) % len(entries)]
+            if replacement.id == deleted.id:
+                replacement = entries[current_index - 1]
+        self.database.delete_entry(deleted.id)
+        self._last_deleted_freewrite = deleted
+        self._load_entry_into_editor(self.current_exercise, replacement)
+        self._focus_editor()
+
+    async def _undo_deleted_freewrite_draft(self) -> None:
+        if not self._can_undo_deleted_freewrite():
+            self.bell()
+            return
+        if self._is_dirty():
+            await self._save_current_entry("manual")
+        assert self.database is not None
+        assert self.current_exercise is not None
+        assert self._last_deleted_freewrite is not None
+        restored = self.database.create_entry(
+            self._last_deleted_freewrite.exercise_id,
+            self._last_deleted_freewrite.draft_kind,
+            self._last_deleted_freewrite.content,
+        )
+        self._last_deleted_freewrite = None
+        self._load_entry_into_editor(self.current_exercise, restored)
+        self._focus_editor()
+
     def _update_draft_controls(self) -> None:
         try:
             toolbar = self.query_one("#draft-toolbar", Horizontal)
@@ -1304,6 +1396,8 @@ class GBTWApp(App[None]):
             previous_button = self.query_one("#draft-prev", Button)
             next_button = self.query_one("#draft-next", Button)
             new_button = self.query_one("#draft-new", Button)
+            delete_button = self.query_one("#draft-delete", Button)
+            undo_button = self.query_one("#draft-undo", Button)
         except Exception:
             return
         visible = self.current_exercise is not None and self._can_manage_freewrite_drafts()
@@ -1313,15 +1407,12 @@ class GBTWApp(App[None]):
         entries = self._current_freewrite_entries()
         count = len(entries)
         current_index = next((index for index, entry in enumerate(entries) if entry.id == self.current_entry_id), 0)
-        current_entry = entries[current_index] if entries else None
-        if current_entry is None:
-            label.update("Draft 0 of 0")
-        else:
-            timestamp = current_entry.updated_at.astimezone().strftime("%Y-%m-%d %H:%M")
-            label.update(f"Draft {current_index + 1} of {count}  {timestamp}")
+        label.update("Draft" if count == 0 else f"Draft {current_index + 1}/{count}")
         previous_button.disabled = count <= 1
         next_button.disabled = count <= 1
         new_button.disabled = False
+        delete_button.disabled = count == 0
+        undo_button.disabled = not self._can_undo_deleted_freewrite()
 
     def _restore_saved_indicator(self) -> None:
         if not self._is_dirty():
