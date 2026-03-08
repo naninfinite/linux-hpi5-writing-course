@@ -20,6 +20,10 @@ DEFAULT_SAVE_MODE = "session"
 _MARKDOWN_PARSER = MarkdownIt("commonmark")
 _PSEUDO_TABLE_SEPARATOR_RE = re.compile(r"^(\s*-{3,})\s+(-{3,}\s*)$")
 _HORIZONTAL_RULE_RE = re.compile(r"^\s*---+\s*$")
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+_UNORDERED_LIST_RE = re.compile(r"^(\s{0,3}[-+*]\s+)(.*)$")
+_ORDERED_LIST_RE = re.compile(r"^(\s{0,3}\d+\.\s+)(.*)$")
+_BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?")
 
 
 @dataclass(slots=True, frozen=True)
@@ -232,6 +236,7 @@ def _normalize_markdown_content(markdown_text: str) -> str:
     lines = _collapse_repeated_horizontal_rules(lines)
     lines = _strip_leading_horizontal_rules(lines)
     lines = _rewrite_pseudo_table_blocks(lines)
+    lines = _reflow_wrapped_blocks(lines)
     lines = _collapse_repeated_horizontal_rules(lines)
     lines = _collapse_blank_runs(lines)
     return "\n".join(lines).strip()
@@ -343,6 +348,84 @@ def _collapse_blank_runs(lines: list[str]) -> list[str]:
         if blank_run <= 1:
             compacted.append("")
     return compacted
+
+
+def _reflow_wrapped_blocks(lines: list[str]) -> list[str]:
+    reflowed: list[str] = []
+    paragraph_parts: list[str] = []
+    list_prefix: str | None = None
+    list_parts: list[str] = []
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph_parts
+        if paragraph_parts:
+            reflowed.append(_join_wrapped_parts(paragraph_parts))
+            paragraph_parts = []
+
+    def flush_list_item() -> None:
+        nonlocal list_prefix, list_parts
+        if list_prefix is not None:
+            reflowed.append(f"{list_prefix}{_join_wrapped_parts(list_parts)}".rstrip())
+            list_prefix = None
+            list_parts = []
+
+    in_fence = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            flush_paragraph()
+            flush_list_item()
+            in_fence = not in_fence
+            reflowed.append(line.rstrip())
+            continue
+        if in_fence:
+            reflowed.append(line.rstrip())
+            continue
+        if not stripped:
+            flush_paragraph()
+            flush_list_item()
+            reflowed.append("")
+            continue
+        if _is_structural_line(line):
+            flush_paragraph()
+            flush_list_item()
+            reflowed.append(line.strip() if _HORIZONTAL_RULE_RE.match(line) else line.rstrip())
+            continue
+        list_match = _UNORDERED_LIST_RE.match(line) or _ORDERED_LIST_RE.match(line)
+        if list_match:
+            flush_paragraph()
+            flush_list_item()
+            list_prefix = list_match.group(1)
+            list_parts = [list_match.group(2).strip()]
+            continue
+        if list_prefix is not None:
+            list_parts.append(stripped)
+            continue
+        paragraph_parts.append(stripped)
+    flush_paragraph()
+    flush_list_item()
+    return reflowed
+
+
+def _is_structural_line(line: str) -> bool:
+    stripped = line.strip()
+    if _HORIZONTAL_RULE_RE.match(line):
+        return True
+    if _HEADING_RE.match(line):
+        return True
+    if _BLOCKQUOTE_RE.match(line):
+        return True
+    if stripped.startswith("```"):
+        return True
+    if stripped.startswith("|"):
+        return True
+    if stripped.startswith("**") and stripped.endswith("**") and " " in stripped[2:-2]:
+        return True
+    return False
+
+
+def _join_wrapped_parts(parts: list[str]) -> str:
+    return re.sub(r"\s+", " ", " ".join(part for part in parts if part)).strip()
 
 
 def _parse_frontmatter_fallback(raw_text: str) -> tuple[dict[str, object], str]:
