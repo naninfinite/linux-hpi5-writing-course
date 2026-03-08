@@ -50,6 +50,8 @@ class HarnessApp(GBTWApp):
         self.draft_label = ""
         self.draft_previous_disabled = True
         self.draft_next_disabled = True
+        self.draft_delete_disabled = True
+        self.draft_undo_disabled = True
 
     def query_one(self, selector: str, expected_type=None):  # type: ignore[override]
         if selector == "#editor":
@@ -77,18 +79,17 @@ class HarnessApp(GBTWApp):
             self.draft_label = ""
             self.draft_previous_disabled = True
             self.draft_next_disabled = True
+            self.draft_delete_disabled = True
+            self.draft_undo_disabled = True
             return
         entries = self._current_freewrite_entries()
         count = len(entries)
         current_index = next((index for index, entry in enumerate(entries) if entry.id == self.current_entry_id), 0)
-        current_entry = entries[current_index] if entries else None
-        if current_entry is None:
-            self.draft_label = "Draft 0 of 0"
-        else:
-            timestamp = current_entry.updated_at.astimezone().strftime("%Y-%m-%d %H:%M")
-            self.draft_label = f"Draft {current_index + 1} of {count}  {timestamp}"
+        self.draft_label = "Draft" if count == 0 else f"Draft {current_index + 1}/{count}"
         self.draft_previous_disabled = count <= 1
         self.draft_next_disabled = count <= 1
+        self.draft_delete_disabled = count == 0
+        self.draft_undo_disabled = not self._can_undo_deleted_freewrite()
 
     def _focus_editor(self) -> None:
         self.focus_target = "editor"
@@ -274,9 +275,11 @@ Body
             self.assertEqual(app.editor.text, "")
             self.assertEqual(len(db.list_history("part1/a.md", "freewrite")), 2)
             self.assertTrue(app.draft_toolbar_visible)
-            self.assertTrue(app.draft_label.startswith("Draft 1 of 2"))
+            self.assertEqual(app.draft_label, "Draft 1/2")
             self.assertFalse(app.draft_previous_disabled)
             self.assertFalse(app.draft_next_disabled)
+            self.assertFalse(app.draft_delete_disabled)
+            self.assertTrue(app.draft_undo_disabled)
 
             app.editor.text = "draft two"
             app._set_save_indicator("Unsaved •", "unsaved")
@@ -290,6 +293,51 @@ Body
 
             self.assertEqual(app.current_entry_id, second_entry_id)
             self.assertEqual(app.editor.text, "draft two")
+            db.close()
+
+    async def test_freewrite_draft_delete_and_undo_restore_content(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "a.md").write_text(
+                """---
+title: A
+part: 1
+module: M
+type: exercise
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part1/a.md", save_current=False)
+            app.editor.text = "draft one"
+            app._set_save_indicator("Unsaved •", "unsaved")
+            await app._save_current_entry("manual")
+            first_entry_id = app.current_entry_id
+
+            await app.action_new_draft()
+            app.editor.text = "draft two"
+            app._set_save_indicator("Unsaved •", "unsaved")
+            await app._save_current_entry("manual")
+
+            await app.action_delete_draft()
+
+            self.assertEqual(len(db.list_history("part1/a.md", "freewrite")), 1)
+            self.assertEqual(app.current_entry_id, first_entry_id)
+            self.assertEqual(app.editor.text, "draft one")
+            self.assertFalse(app.draft_undo_disabled)
+
+            await app.action_undo_delete_draft()
+
+            self.assertEqual(len(db.list_history("part1/a.md", "freewrite")), 2)
+            self.assertNotEqual(app.current_entry_id, first_entry_id)
+            self.assertEqual(app.editor.text, "draft two")
+            self.assertTrue(app.draft_undo_disabled)
             db.close()
 
     async def test_reopening_exercise_restores_selected_freewrite_draft(self) -> None:
