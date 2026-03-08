@@ -64,11 +64,51 @@ Body
         self.assertEqual(index.exercises, ())
         self.assertEqual(len(index.warnings), 1)
 
+    def test_load_content_index_normalizes_pseudo_table_intro_blocks(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "part1").mkdir()
+            (root / "part1" / "intro.md").write_text(
+                """---
+title: Intro
+part: 1
+module: Start
+type: reading
+---
+
+---
+
+---
+
+  **This document is
+  for**              Helping you start.
+  ------------------ -----------------
+  **It builds**      Confidence
+                     and momentum.
+
+---
+
+# Next section
+""",
+                encoding="utf-8",
+            )
+            index = load_content_index(root)
+
+        self.assertEqual(len(index.exercises), 1)
+        self.assertEqual(
+            index.exercises[0].body,
+            "- **This document is for**: Helping you start.\n"
+            "- **It builds**: Confidence and momentum.\n"
+            "---\n\n"
+            "# Next section",
+        )
+
     def test_render_markdown_fallback_extracts_text(self) -> None:
-        output = render_markdown_fallback("# Heading\n\n- One\n- Two\n\n`code`")
+        output = render_markdown_fallback("# Heading\n\n- **One**\n- Two\n\n`code`")
         self.assertIn("Heading", output)
-        self.assertIn("One", output)
+        self.assertIn("- One", output)
         self.assertIn("code", output)
+        self.assertNotIn("**", output)
 
 
 if __name__ == "__main__":
