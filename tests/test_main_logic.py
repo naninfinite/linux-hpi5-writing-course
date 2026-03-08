@@ -46,6 +46,10 @@ class HarnessApp(GBTWApp):
         self.bell_count = 0
         self.pending_tasks: list[asyncio.Task[object]] = []
         self.pushed_screen = None
+        self.draft_toolbar_visible = False
+        self.draft_label = ""
+        self.draft_previous_disabled = True
+        self.draft_next_disabled = True
 
     def query_one(self, selector: str, expected_type=None):  # type: ignore[override]
         if selector == "#editor":
@@ -65,6 +69,26 @@ class HarnessApp(GBTWApp):
     def _set_save_indicator(self, text: str, state: str) -> None:
         self._last_save_message = text
         self._save_indicator_state = state
+
+    def _update_draft_controls(self) -> None:
+        visible = self.current_exercise is not None and self._can_manage_freewrite_drafts()
+        self.draft_toolbar_visible = visible
+        if not visible:
+            self.draft_label = ""
+            self.draft_previous_disabled = True
+            self.draft_next_disabled = True
+            return
+        entries = self._current_freewrite_entries()
+        count = len(entries)
+        current_index = next((index for index, entry in enumerate(entries) if entry.id == self.current_entry_id), 0)
+        current_entry = entries[current_index] if entries else None
+        if current_entry is None:
+            self.draft_label = "Draft 0 of 0"
+        else:
+            timestamp = current_entry.updated_at.astimezone().strftime("%Y-%m-%d %H:%M")
+            self.draft_label = f"Draft {current_index + 1} of {count}  {timestamp}"
+        self.draft_previous_disabled = count <= 1
+        self.draft_next_disabled = count <= 1
 
     def _focus_editor(self) -> None:
         self.focus_target = "editor"
@@ -216,6 +240,109 @@ Body B
             self.assertEqual(db.get_latest_entry("part1/b.md", "freewrite").content, "draft b")
             self.assertEqual(app.current_exercise.exercise_id, "part1/a.md")
             self.assertEqual(app.editor.text, "draft a")
+            db.close()
+
+    async def test_freewrite_drafts_can_be_created_and_cycled(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "a.md").write_text(
+                """---
+title: A
+part: 1
+module: M
+type: exercise
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part1/a.md", save_current=False)
+            app.editor.text = "draft one"
+            app._set_save_indicator("Unsaved •", "unsaved")
+            await app._save_current_entry("manual")
+            first_entry_id = app.current_entry_id
+
+            await app.action_new_draft()
+            second_entry_id = app.current_entry_id
+
+            self.assertNotEqual(second_entry_id, first_entry_id)
+            self.assertEqual(app.editor.text, "")
+            self.assertEqual(len(db.list_history("part1/a.md", "freewrite")), 2)
+            self.assertTrue(app.draft_toolbar_visible)
+            self.assertTrue(app.draft_label.startswith("Draft 1 of 2"))
+            self.assertFalse(app.draft_previous_disabled)
+            self.assertFalse(app.draft_next_disabled)
+
+            app.editor.text = "draft two"
+            app._set_save_indicator("Unsaved •", "unsaved")
+            await app.action_previous_draft()
+
+            self.assertEqual(db.get_entry_by_id(second_entry_id).content, "draft two")
+            self.assertEqual(app.current_entry_id, first_entry_id)
+            self.assertEqual(app.editor.text, "draft one")
+
+            await app.action_next_draft()
+
+            self.assertEqual(app.current_entry_id, second_entry_id)
+            self.assertEqual(app.editor.text, "draft two")
+            db.close()
+
+    async def test_reopening_exercise_restores_selected_freewrite_draft(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "a.md").write_text(
+                """---
+title: A
+part: 1
+module: M
+type: exercise
+---
+
+Body A
+""",
+                encoding="utf-8",
+            )
+            (root / "part1" / "b.md").write_text(
+                """---
+title: B
+part: 1
+module: M
+type: exercise
+---
+
+Body B
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part1/a.md", save_current=False)
+            app.editor.text = "draft one"
+            app._set_save_indicator("Unsaved •", "unsaved")
+            await app._save_current_entry("manual")
+            first_entry_id = app.current_entry_id
+
+            await app.action_new_draft()
+            app.editor.text = "draft two"
+            app._set_save_indicator("Unsaved •", "unsaved")
+            await app._save_current_entry("manual")
+
+            await app.action_previous_draft()
+            self.assertEqual(app.current_entry_id, first_entry_id)
+            self.assertEqual(app.editor.text, "draft one")
+
+            await app._open_exercise_by_id("part1/b.md")
+            await app._open_exercise_by_id("part1/a.md")
+
+            self.assertEqual(app.current_entry_id, first_entry_id)
+            self.assertEqual(app.editor.text, "draft one")
             db.close()
 
     async def test_ctrl_j_creates_new_row_only_for_session_mode(self) -> None:
