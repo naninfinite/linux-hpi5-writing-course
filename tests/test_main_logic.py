@@ -671,6 +671,62 @@ Prompt
             self.assertEqual(app.bell_count, 1)
             db.close()
 
+    async def test_project_mode_is_disabled_without_project_key(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "exercise.md").write_text(
+                """---
+title: Exercise
+part: 1
+module: M
+type: exercise
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part1/exercise.md", save_current=False)
+            await app.action_set_mode("project")
+
+            self.assertEqual(app.current_layout_mode, "side")
+            self.assertEqual(app.bell_count, 1)
+            db.close()
+
+    async def test_project_mode_is_available_on_linked_reading_docs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part2").mkdir(parents=True)
+            (root / "part2" / "reading.md").write_text(
+                """---
+title: Reading
+part: 2
+module: Novel
+type: reading
+project_key: part2-novel
+project_title: Part 2 Novel
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part2/reading.md", save_current=False)
+            await app.action_set_mode("project")
+
+            self.assertEqual(app.current_layout_mode, "project")
+            self.assertEqual(app._effective_layout_mode(), "project")
+            self.assertFalse(app.editor.disabled)
+            self.assertEqual(app.focus_target, "editor")
+            db.close()
+
     async def test_exercise_mode_seeds_blank_scaffold(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "content"
@@ -751,6 +807,96 @@ Prompt
             self.assertEqual(db.get_latest_entry("part1/exercise.md", "exercise").content, exercise_text)
             db.close()
 
+    async def test_project_mode_reuses_same_shared_draft_across_linked_docs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part2").mkdir(parents=True)
+            (root / "part2" / "seed.md").write_text(
+                """---
+title: Seed
+part: 2
+module: Novel
+type: long-term
+save_mode: project
+project_key: part2-novel
+project_title: Part 2 Novel
+project_seed: true
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            (root / "part2" / "reading.md").write_text(
+                """---
+title: Reading
+part: 2
+module: Novel
+type: reading
+project_key: part2-novel
+project_title: Part 2 Novel
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part2/seed.md", save_current=False)
+            await app.action_set_mode("project")
+            first_project_entry = app.current_entry_id
+            app.editor.text = "shared manuscript"
+            app._set_save_indicator("Unsaved •", "unsaved")
+
+            await app._open_exercise_by_id("part2/reading.md")
+
+            self.assertEqual(app.current_entry_id, first_project_entry)
+            self.assertEqual(app.editor.text, "shared manuscript")
+            db.close()
+
+    async def test_project_mode_falls_back_to_freewrite_on_unlinked_writable_doc(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part2").mkdir(parents=True)
+            (root / "part2" / "linked.md").write_text(
+                """---
+title: Linked
+part: 2
+module: Novel
+type: exercise
+project_key: part2-novel
+project_title: Part 2 Novel
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            (root / "part2" / "freewrite.md").write_text(
+                """---
+title: Freewrite
+part: 2
+module: Novel
+type: exercise
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part2/linked.md", save_current=False)
+            await app.action_set_mode("project")
+            await app._open_exercise_by_id("part2/freewrite.md")
+
+            self.assertEqual(app._effective_layout_mode(), "freewrite")
+            self.assertFalse(app.editor.disabled)
+            db.close()
+
     async def test_history_scopes_to_current_draft_kind(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "content"
@@ -800,6 +946,93 @@ Prompt
                 [entry.draft_kind for entry in app.pushed_screen.entries],
                 ["exercise"],
             )
+            db.close()
+
+    async def test_project_history_uses_project_entries_and_title(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part4").mkdir(parents=True)
+            (root / "part4" / "portfolio.md").write_text(
+                """---
+title: Portfolio
+part: 4
+module: Portfolio
+type: long-term
+save_mode: project
+project_key: part4-portfolio
+project_title: Part 4 Portfolio
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part4/portfolio.md", save_current=False)
+            await app.action_set_mode("project")
+            app.editor.text = "portfolio manuscript"
+            app._set_save_indicator("Unsaved •", "unsaved")
+            await app._save_current_entry("manual")
+            await app.action_show_history()
+
+            self.assertEqual(app.pushed_screen.title, "Part 4 Portfolio")
+            self.assertEqual(app.pushed_screen.entries[0].project_key, "part4-portfolio")
+            db.close()
+
+    async def test_project_mode_seeds_from_seed_doc_freewrite_history(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part2").mkdir(parents=True)
+            (root / "part2" / "seed.md").write_text(
+                """---
+title: Seed
+part: 2
+module: Novel
+type: long-term
+save_mode: project
+project_key: part2-novel
+project_title: Part 2 Novel
+project_seed: true
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            (root / "part2" / "reading.md").write_text(
+                """---
+title: Reading
+part: 2
+module: Novel
+type: reading
+project_key: part2-novel
+project_title: Part 2 Novel
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part2/seed.md", save_current=False)
+            app.editor.text = "seed freewrite"
+            app._set_save_indicator("Unsaved •", "unsaved")
+            await app._save_current_entry("manual")
+            await app.action_new_draft()
+            app.editor.text = "latest freewrite"
+            app._set_save_indicator("Unsaved •", "unsaved")
+            await app._save_current_entry("manual")
+
+            await app._open_exercise_by_id("part2/reading.md")
+            await app.action_set_mode("project")
+
+            self.assertEqual(app.editor.text, "latest freewrite")
+            self.assertEqual(len(db.list_project_history("part2-novel")), 2)
+            self.assertEqual(len(db.list_history("part2/seed.md", "freewrite")), 2)
             db.close()
 
     async def test_restore_preferences_maps_legacy_write_to_freewrite(self) -> None:
