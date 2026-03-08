@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from datetime import datetime
 
+from rich.markdown import Markdown
 from textual import on
 from textual import events
 from textual.app import App, ComposeResult
@@ -15,7 +16,7 @@ from textual.timer import Timer
 from textual.widgets import Button, Input, Label, MarkdownViewer, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
-from .content import ContentIndex, Exercise, load_content_index, render_markdown_fallback
+from .content import ContentIndex, Exercise, load_content_index
 from .db import Database, EntryRecord
 
 SIDE_RATIOS: tuple[tuple[int, int], ...] = ((40, 60), (50, 50), (60, 40))
@@ -323,9 +324,14 @@ class GBTWApp(App[None]):
         width: 100%;
     }
 
+    #exercise-fallback {
+        padding: 0 1 1 1;
+    }
+
     #exercise-fallback-view {
         width: 100%;
         height: auto;
+        color: #e3ded7;
     }
 
     #editor {
@@ -760,7 +766,14 @@ class GBTWApp(App[None]):
             fallback.display = False
             self._using_markdown_fallback = False
         except Exception:
-            fallback_text.update(render_markdown_fallback(markdown_text))
+            fallback_text.update(
+                Markdown(
+                    markdown_text,
+                    code_theme="monokai",
+                    hyperlinks=True,
+                    justify="left",
+                )
+            )
             viewer.display = False
             fallback.display = True
             self._using_markdown_fallback = True
