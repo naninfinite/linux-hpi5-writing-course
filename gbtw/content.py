@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import re
 from typing import Iterable
@@ -42,6 +42,9 @@ class Exercise:
     save_mode: str | None
     body: str
     guided_questions: tuple[str, ...]
+    project_key: str | None
+    project_title: str | None
+    project_seed: bool
 
     @property
     def is_long_term(self) -> bool:
@@ -70,6 +73,15 @@ class ContentIndex:
                 return exercise
         return None
 
+    def project_exercises(self, project_key: str) -> tuple[Exercise, ...]:
+        return tuple(exercise for exercise in self.exercises if exercise.project_key == project_key)
+
+    def project_seed(self, project_key: str) -> Exercise | None:
+        for exercise in self.project_exercises(project_key):
+            if exercise.project_seed:
+                return exercise
+        return None
+
     def first_available(self) -> Exercise | None:
         visible = self.visible_exercises()
         return visible[0] if visible else None
@@ -91,6 +103,8 @@ def load_content_index(content_root: Path = CONTENT_ROOT) -> ContentIndex:
             warnings.append(f"{markdown_file}: {exc}")
         except Exception as exc:  # pragma: no cover - defensive skip for malformed files
             warnings.append(f"{markdown_file}: unexpected error: {exc}")
+    exercises, project_warnings = _validate_project_groups(exercises)
+    warnings.extend(project_warnings)
     exercises.sort(key=lambda item: (item.part, item.exercise_id))
     return ContentIndex(tuple(exercises), tuple(warnings))
 
@@ -202,6 +216,9 @@ def _load_exercise(markdown_file: Path, content_root: Path) -> Exercise:
         save_mode = metadata.get("save_mode", DEFAULT_SAVE_MODE)
         if save_mode not in {"session", "project"}:
             raise ValueError(f"invalid save_mode {save_mode!r}")
+    project_key = _optional_string(metadata, "project_key")
+    project_title = _optional_string(metadata, "project_title")
+    project_seed = _optional_bool(metadata, "project_seed")
     exercise_id = markdown_file.relative_to(content_root).as_posix()
     normalized_body = _normalize_markdown_content(content)
     return Exercise(
@@ -215,6 +232,9 @@ def _load_exercise(markdown_file: Path, content_root: Path) -> Exercise:
         save_mode=save_mode,
         body=normalized_body,
         guided_questions=_extract_guided_questions(normalized_body),
+        project_key=project_key,
+        project_title=project_title,
+        project_seed=project_seed,
     )
 
 
@@ -230,6 +250,88 @@ def _require_int(metadata: dict[str, object], key: str) -> int:
     if not isinstance(value, int):
         raise ValueError(f"missing or invalid {key!r}")
     return value
+
+
+def _optional_string(metadata: dict[str, object], key: str) -> str | None:
+    value = metadata.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"missing or invalid {key!r}")
+    stripped = value.strip()
+    return stripped or None
+
+
+def _optional_bool(metadata: dict[str, object], key: str) -> bool:
+    value = metadata.get(key)
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1"}:
+            return True
+        if normalized in {"false", "no", "0"}:
+            return False
+    raise ValueError(f"missing or invalid {key!r}")
+
+
+def _validate_project_groups(exercises: list[Exercise]) -> tuple[list[Exercise], list[str]]:
+    grouped: dict[str, list[Exercise]] = {}
+    for exercise in exercises:
+        if exercise.project_key is None:
+            continue
+        grouped.setdefault(exercise.project_key, []).append(exercise)
+
+    warnings: list[str] = []
+    disabled_keys: set[str] = set()
+    replacements: dict[str, Exercise] = {}
+
+    for project_key, items in grouped.items():
+        titles = {
+            exercise.project_title
+            for exercise in items
+            if exercise.project_title is not None
+        }
+        seeds = [exercise for exercise in items if exercise.project_seed]
+
+        if len(titles) > 1:
+            warnings.append(f"project {project_key!r}: inconsistent project_title values")
+            disabled_keys.add(project_key)
+            continue
+        if len(seeds) > 1:
+            warnings.append(f"project {project_key!r}: multiple project_seed documents")
+            disabled_keys.add(project_key)
+            continue
+        if len(items) > 1 and len(seeds) != 1:
+            warnings.append(f"project {project_key!r}: multiple linked documents require exactly one project_seed")
+            disabled_keys.add(project_key)
+            continue
+
+        canonical_title = next(iter(titles), None)
+        if canonical_title is not None:
+            for exercise in items:
+                if exercise.project_title != canonical_title:
+                    replacements[exercise.exercise_id] = replace(exercise, project_title=canonical_title)
+
+    if not disabled_keys and not replacements:
+        return exercises, warnings
+
+    validated: list[Exercise] = []
+    for exercise in exercises:
+        if exercise.project_key in disabled_keys:
+            validated.append(
+                replace(
+                    exercise,
+                    project_key=None,
+                    project_title=None,
+                    project_seed=False,
+                )
+            )
+            continue
+        validated.append(replacements.get(exercise.exercise_id, exercise))
+    return validated, warnings
 
 
 def _load_markdown_file(markdown_file: Path) -> tuple[dict[str, object], str]:
