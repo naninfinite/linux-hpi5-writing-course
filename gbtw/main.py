@@ -216,6 +216,7 @@ class ExerciseListScreen(ModalScreen[str | None]):
     def _refresh_options(self) -> None:
         hint = self.query_one("#exercise-list-hint", Label)
         hint.update(
+            "Grouped by Part and Module. Enter opens an exercise. "
             "Ctrl+A toggles archived exercises "
             f"({'shown' if self.show_archived else 'hidden'})"
         )
@@ -223,10 +224,17 @@ class ExerciseListScreen(ModalScreen[str | None]):
         options: list[Option | None] = []
         for part, exercises in self.content_index.grouped_by_part(include_archived=self.show_archived).items():
             options.append(Option(f"Part {part}", id=f"header:{part}", disabled=True))
+            current_module: str | None = None
             for exercise in exercises:
+                if exercise.module != current_module:
+                    current_module = exercise.module
+                    options.append(
+                        Option(f"  {current_module}", id=f"module:{part}:{current_module}", disabled=True)
+                    )
                 marker = " [optional]" if exercise.status == "optional" else ""
+                archived = " [archived]" if exercise.status == "archived" else ""
                 current = " *" if exercise.exercise_id == self.current_exercise_id else ""
-                label = f"{exercise.title}{marker}{current}"
+                label = f"    {exercise.title}{marker}{archived}{current}"
                 options.append(Option(label, id=f"exercise:{exercise.exercise_id}"))
         option_list.clear_options()
         option_list.add_options(options)
