@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Iterable
 
 from markdown_it import MarkdownIt
@@ -17,6 +18,8 @@ VALID_TYPES = {"exercise", "reading", "long-term"}
 VALID_STATUSES = {"active", "archived", "optional"}
 DEFAULT_SAVE_MODE = "session"
 _MARKDOWN_PARSER = MarkdownIt("commonmark")
+_PSEUDO_TABLE_SEPARATOR_RE = re.compile(r"^(\s*-{3,})\s+(-{3,}\s*)$")
+_HORIZONTAL_RULE_RE = re.compile(r"^\s*---+\s*$")
 
 
 @dataclass(slots=True, frozen=True)
@@ -83,17 +86,55 @@ def render_markdown_fallback(markdown_text: str) -> str:
     if not markdown_text.strip():
         return ""
     tokens = _MARKDOWN_PARSER.parse(markdown_text)
-    chunks: list[str] = []
+    lines: list[str] = []
+    current_line = ""
+    list_stack: list[dict[str, int | str]] = []
+
+    def flush_line(*, blank_after: bool = False) -> None:
+        nonlocal current_line
+        stripped = current_line.rstrip()
+        if stripped:
+            lines.extend(stripped.splitlines())
+        current_line = ""
+        if blank_after and (not lines or lines[-1] != ""):
+            lines.append("")
+
     for token in tokens:
-        if token.type == "inline" and token.content:
-            chunks.append(token.content)
+        if token.type == "bullet_list_open":
+            list_stack.append({"type": "bullet"})
+            continue
+        if token.type == "bullet_list_close":
+            flush_line(blank_after=True)
+            list_stack.pop()
+            continue
+        if token.type == "ordered_list_open":
+            start = token.attrGet("start")
+            list_stack.append({"type": "ordered", "next": int(start) if start else 1})
+            continue
+        if token.type == "ordered_list_close":
+            flush_line(blank_after=True)
+            list_stack.pop()
+            continue
+        if token.type == "list_item_open":
+            flush_line()
+            if list_stack and list_stack[-1]["type"] == "ordered":
+                number = int(list_stack[-1]["next"])
+                current_line = f"{number}. "
+                list_stack[-1]["next"] = number + 1
+            else:
+                current_line = "- "
+            continue
+        if token.type == "inline":
+            current_line += _render_inline_fallback_text(token)
+            continue
+        if token.type in {"heading_close", "paragraph_close"}:
+            flush_line(blank_after=(token.type == "heading_close" or not list_stack))
+            continue
         elif token.type in {"fence", "code_block"} and token.content:
-            chunks.append(token.content.rstrip())
-        elif token.type == "softbreak":
-            chunks.append("\n")
-        elif token.type == "hardbreak":
-            chunks.append("\n")
-    lines = [line.rstrip() for line in "\n".join(chunks).splitlines()]
+            flush_line(blank_after=bool(lines and lines[-1] != ""))
+            lines.extend(token.content.rstrip().splitlines())
+            lines.append("")
+    flush_line()
     compacted: list[str] = []
     blank_run = 0
     for line in lines:
@@ -105,6 +146,21 @@ def render_markdown_fallback(markdown_text: str) -> str:
         if blank_run <= 1:
             compacted.append("")
     return "\n".join(compacted).strip()
+
+
+def _render_inline_fallback_text(token: object) -> str:
+    children = getattr(token, "children", None)
+    if not children:
+        return getattr(token, "content", "")
+    parts: list[str] = []
+    for child in children:
+        if child.type == "text" and child.content:
+            parts.append(child.content)
+        elif child.type == "code_inline" and child.content:
+            parts.append(child.content)
+        elif child.type in {"softbreak", "hardbreak"}:
+            parts.append("\n")
+    return "".join(parts)
 
 
 def _iter_markdown_files(content_root: Path) -> Iterable[Path]:
@@ -143,7 +199,7 @@ def _load_exercise(markdown_file: Path, content_root: Path) -> Exercise:
         type=exercise_type,
         status=status,
         save_mode=save_mode,
-        body=content.strip(),
+        body=_normalize_markdown_content(content),
     )
 
 
@@ -167,6 +223,126 @@ def _load_markdown_file(markdown_file: Path) -> tuple[dict[str, object], str]:
         return dict(post.metadata), str(post.content)
     raw_text = markdown_file.read_text(encoding="utf-8")
     return _parse_frontmatter_fallback(raw_text)
+
+
+def _normalize_markdown_content(markdown_text: str) -> str:
+    if not markdown_text.strip():
+        return ""
+    lines = markdown_text.strip().splitlines()
+    lines = _collapse_repeated_horizontal_rules(lines)
+    lines = _strip_leading_horizontal_rules(lines)
+    lines = _rewrite_pseudo_table_blocks(lines)
+    lines = _collapse_repeated_horizontal_rules(lines)
+    lines = _collapse_blank_runs(lines)
+    return "\n".join(lines).strip()
+
+
+def _collapse_repeated_horizontal_rules(lines: list[str]) -> list[str]:
+    collapsed: list[str] = []
+    previous_significant_rule = False
+    for line in lines:
+        if _HORIZONTAL_RULE_RE.match(line):
+            if previous_significant_rule:
+                continue
+            collapsed.append("---")
+            previous_significant_rule = True
+            continue
+        collapsed.append(line)
+        if line.strip():
+            previous_significant_rule = False
+    return collapsed
+
+
+def _strip_leading_horizontal_rules(lines: list[str]) -> list[str]:
+    index = 0
+    while index < len(lines) and (_HORIZONTAL_RULE_RE.match(lines[index]) or not lines[index].strip()):
+        index += 1
+    return lines[index:] if index else lines
+
+
+def _rewrite_pseudo_table_blocks(lines: list[str]) -> list[str]:
+    rewritten: list[str] = []
+    index = 0
+    while index < len(lines):
+        match = _PSEUDO_TABLE_SEPARATOR_RE.match(lines[index])
+        if not match:
+            rewritten.append(lines[index])
+            index += 1
+            continue
+        start = index - 1
+        while start >= 0 and _is_pseudo_table_line(lines[start]):
+            start -= 1
+        start += 1
+        if start < index:
+            del rewritten[-(index - start):]
+        end = index + 1
+        while end < len(lines) and _is_pseudo_table_line(lines[end]):
+            end += 1
+        rewritten.extend(_format_pseudo_table_block(lines[start:end], len(match.group(1))))
+        index = end
+    return rewritten
+
+
+def _is_pseudo_table_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if _PSEUDO_TABLE_SEPARATOR_RE.match(line):
+        return True
+    return line.startswith("  ")
+
+
+def _format_pseudo_table_block(lines: list[str], split_at: int) -> list[str]:
+    bullets: list[str] = []
+    left_parts: list[str] = []
+    right_parts: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or _PSEUDO_TABLE_SEPARATOR_RE.match(line):
+            continue
+        row_starts = stripped.startswith("**")
+        if row_starts and (left_parts or right_parts):
+            bullets.append(_format_pseudo_table_row(left_parts, right_parts))
+            left_parts = []
+            right_parts = []
+        left = line[:split_at].strip()
+        right = line[split_at:].strip()
+        if left:
+            left_parts.append(left)
+        if right:
+            right_parts.append(right)
+    if left_parts or right_parts:
+        bullets.append(_format_pseudo_table_row(left_parts, right_parts))
+    return bullets or [line for line in lines if line.strip()]
+
+
+def _format_pseudo_table_row(left_parts: list[str], right_parts: list[str]) -> str:
+    left = _join_table_fragments(left_parts)
+    right = _join_table_fragments(right_parts)
+    if left and right:
+        return f"- {left}: {right}"
+    if left:
+        return f"- {left}"
+    return f"- {right}"
+
+
+def _join_table_fragments(parts: list[str]) -> str:
+    joined = " ".join(part.strip() for part in parts if part.strip())
+    return re.sub(r"\s+", " ", joined).strip()
+
+
+def _collapse_blank_runs(lines: list[str]) -> list[str]:
+    compacted: list[str] = []
+    blank_run = 0
+    for line in lines:
+        if line.strip():
+            blank_run = 0
+            compacted.append(line.rstrip())
+            continue
+        blank_run += 1
+        if blank_run <= 1:
+            compacted.append("")
+    return compacted
 
 
 def _parse_frontmatter_fallback(raw_text: str) -> tuple[dict[str, object], str]:
