@@ -336,6 +336,7 @@ class GBTWApp(App[None]):
 
     #writing-pane {
         background: #0f1519;
+        layout: vertical;
     }
 
     #exercise-header {
@@ -374,6 +375,22 @@ class GBTWApp(App[None]):
     #editor {
         height: 1fr;
         background: #0f1519;
+    }
+
+    #draft-toolbar {
+        height: auto;
+        padding: 0 0 1 0;
+        align-vertical: middle;
+    }
+
+    #draft-label {
+        width: 1fr;
+        color: #aeb6bb;
+        padding: 0 1;
+    }
+
+    .draft-button {
+        min-width: 3;
     }
 
     #bottom-bar {
@@ -597,6 +614,11 @@ class GBTWApp(App[None]):
                 with VerticalScroll(id="exercise-fallback"):
                     yield Static("", id="exercise-fallback-view")
             with Container(id="writing-pane"):
+                with Horizontal(id="draft-toolbar"):
+                    yield Button("<", id="draft-prev", classes="draft-button")
+                    yield Label("", id="draft-label")
+                    yield Button(">", id="draft-next", classes="draft-button")
+                    yield Button("New Draft", id="draft-new", classes="draft-button")
                 yield TextArea("", id="editor")
         with Horizontal(id="bottom-bar"):
             with Horizontal(id="left-buttons", classes="button-row"):
@@ -643,7 +665,7 @@ class GBTWApp(App[None]):
                 await self._save_current_entry("switch")
             self._load_entry_into_editor(
                 self.current_exercise,
-                self.database.resolve_entry_for_exercise(
+                self._resolve_entry_for_exercise(
                     self.current_exercise,
                     self._current_draft_kind(),
                 ),
@@ -674,6 +696,15 @@ class GBTWApp(App[None]):
 
     async def action_save(self) -> None:
         await self._save_current_entry("manual")
+
+    async def action_previous_draft(self) -> None:
+        await self._cycle_freewrite_draft(-1)
+
+    async def action_next_draft(self) -> None:
+        await self._cycle_freewrite_draft(1)
+
+    async def action_new_draft(self) -> None:
+        await self._create_new_freewrite_draft()
 
     async def action_new_session_now(self) -> None:
         if self.current_exercise is None or not self.current_exercise.is_long_term:
@@ -745,6 +776,16 @@ class GBTWApp(App[None]):
             self.push_screen(HelpScreen())
             event.stop()
 
+    @on(Button.Pressed)
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        if button_id == "draft-prev":
+            await self.action_previous_draft()
+        elif button_id == "draft-next":
+            await self.action_next_draft()
+        elif button_id == "draft-new":
+            await self.action_new_draft()
+
     @on(FooterControl.Pressed)
     async def on_footer_control_pressed(self, event: FooterControl.Pressed) -> None:
         control_id = event.control_id
@@ -794,7 +835,8 @@ class GBTWApp(App[None]):
     async def _load_initial_exercise(self) -> None:
         assert self.database is not None
         preferred_id = self.database.get_preference("last_exercise_id")
-        if preferred_id and self.content_index.get(preferred_id):
+        visible_ids = {exercise.exercise_id for exercise in self.content_index.visible_exercises()}
+        if preferred_id and preferred_id in visible_ids:
             await self._open_exercise_by_id(preferred_id, save_current=False)
             return
         first = self.content_index.first_available()
@@ -817,6 +859,7 @@ class GBTWApp(App[None]):
         editor.disabled = True
         self._set_save_indicator("Saved ✓", "saved")
         self._update_word_count()
+        self._update_draft_controls()
 
     def _on_exercise_list_closed(self, selection: str | None) -> None:
         if selection:
@@ -831,17 +874,18 @@ class GBTWApp(App[None]):
             self._start_sprint(seconds)
 
     async def _step_exercise(self, direction: int) -> None:
-        if not self.content_index.exercises or self.current_exercise is None:
+        visible_exercises = self.content_index.visible_exercises()
+        if not visible_exercises or self.current_exercise is None:
             return
         current_index = next(
-            (index for index, item in enumerate(self.content_index.exercises) if item.exercise_id == self.current_exercise.exercise_id),
+            (index for index, item in enumerate(visible_exercises) if item.exercise_id == self.current_exercise.exercise_id),
             0,
         )
-        next_index = max(0, min(len(self.content_index.exercises) - 1, current_index + direction))
+        next_index = max(0, min(len(visible_exercises) - 1, current_index + direction))
         if next_index == current_index:
             self.bell()
             return
-        await self._open_exercise_by_id(self.content_index.exercises[next_index].exercise_id)
+        await self._open_exercise_by_id(visible_exercises[next_index].exercise_id)
 
     async def _open_exercise_by_id(self, exercise_id: str, *, save_current: bool = True) -> None:
         target = self.content_index.get(exercise_id)
@@ -854,7 +898,7 @@ class GBTWApp(App[None]):
         self.database.set_preference("last_exercise_id", target.exercise_id)
         self._update_exercise_header(target)
         await self._update_exercise_markdown(target.body)
-        record = self.database.resolve_entry_for_exercise(target, self._draft_kind_for_exercise(target))
+        record = self._resolve_entry_for_exercise(target, self._draft_kind_for_exercise(target))
         self._load_entry_into_editor(target, record)
         self._update_bottom_bar()
         if self._effective_layout_mode(target) == "read":
@@ -1000,8 +1044,48 @@ class GBTWApp(App[None]):
     def _draft_kind_for_exercise(self, exercise: Exercise | None) -> str:
         return "exercise" if self._effective_layout_mode(exercise) == "exercise" else "freewrite"
 
+    def _draft_preference_key(self, exercise: Exercise, draft_kind: str) -> str:
+        return f"active_entry:{draft_kind}:{exercise.exercise_id}"
+
+    def _resolve_entry_for_exercise(self, exercise: Exercise, draft_kind: str) -> EntryRecord:
+        assert self.database is not None
+        preferred_entry_id = self.database.get_preference(self._draft_preference_key(exercise, draft_kind))
+        if preferred_entry_id is not None:
+            try:
+                preferred = self.database.get_entry_by_id(int(preferred_entry_id))
+            except (KeyError, ValueError):
+                preferred = None
+            if preferred is not None and self._entry_matches_current_slot(exercise, draft_kind, preferred):
+                return preferred
+        return self.database.resolve_entry_for_exercise(exercise, draft_kind)
+
+    def _entry_matches_current_slot(self, exercise: Exercise, draft_kind: str, record: EntryRecord) -> bool:
+        if record.exercise_id != exercise.exercise_id or record.draft_kind != draft_kind:
+            return False
+        if exercise.is_long_term and exercise.save_mode == "session":
+            return record.created_at.astimezone().date() == datetime.now().astimezone().date()
+        return True
+
+    def _remember_active_entry(self, exercise: Exercise, record: EntryRecord) -> None:
+        assert self.database is not None
+        self.database.set_preference(
+            self._draft_preference_key(exercise, record.draft_kind),
+            str(record.id),
+        )
+
+    def _can_manage_freewrite_drafts(self, exercise: Exercise | None = None) -> bool:
+        target = self.current_exercise if exercise is None else exercise
+        return self._exercise_supports_writing(target) and self._draft_kind_for_exercise(target) == "freewrite"
+
+    def _current_freewrite_entries(self) -> list[EntryRecord]:
+        if self.current_exercise is None or not self._can_manage_freewrite_drafts(self.current_exercise):
+            return []
+        assert self.database is not None
+        return self.database.list_history(self.current_exercise.exercise_id, "freewrite")
+
     def _load_entry_into_editor(self, exercise: Exercise, record: EntryRecord) -> None:
         self.current_entry_id = record.id
+        self._remember_active_entry(exercise, record)
         editor = self.query_one("#editor", TextArea)
         editor.disabled = not self._exercise_supports_writing(exercise)
         loaded_text = self._editor_text_for_record(exercise, record)
@@ -1011,6 +1095,7 @@ class GBTWApp(App[None]):
         self._loading_editor = False
         self._set_save_indicator("Saved ✓", "saved")
         self._update_word_count()
+        self._update_draft_controls()
 
     def _editor_text_for_record(self, exercise: Exercise, record: EntryRecord) -> str:
         if record.content:
@@ -1069,7 +1154,10 @@ class GBTWApp(App[None]):
         if generation != self._save_generation:
             return
         self.current_entry_id = record.id
+        if self.current_exercise is not None:
+            self._remember_active_entry(self.current_exercise, record)
         self._set_save_indicator("Saved ✓", "saved")
+        self._update_draft_controls()
         if reason == "manual":
             self.set_timer(1.5, lambda: self.call_after_refresh(self._restore_saved_indicator))
 
@@ -1086,6 +1174,64 @@ class GBTWApp(App[None]):
         )
         self._load_entry_into_editor(self.current_exercise, record)
         self._focus_editor()
+
+    async def _create_new_freewrite_draft(self) -> None:
+        if self.current_exercise is None or not self._can_manage_freewrite_drafts():
+            self.bell()
+            return
+        if self._is_dirty():
+            await self._save_current_entry("manual")
+        assert self.database is not None
+        record = self.database.create_entry(
+            self.current_exercise.exercise_id,
+            "freewrite",
+            "",
+        )
+        self._load_entry_into_editor(self.current_exercise, record)
+        self._focus_editor()
+
+    async def _cycle_freewrite_draft(self, direction: int) -> None:
+        if self.current_exercise is None or not self._can_manage_freewrite_drafts():
+            self.bell()
+            return
+        entries = self._current_freewrite_entries()
+        if len(entries) <= 1:
+            self.bell()
+            return
+        current_index = next((index for index, entry in enumerate(entries) if entry.id == self.current_entry_id), 0)
+        target = entries[(current_index + direction) % len(entries)]
+        if target.id == self.current_entry_id:
+            return
+        if self._is_dirty():
+            await self._save_current_entry("switch")
+        self._load_entry_into_editor(self.current_exercise, target)
+        self._focus_editor()
+
+    def _update_draft_controls(self) -> None:
+        try:
+            toolbar = self.query_one("#draft-toolbar", Horizontal)
+            label = self.query_one("#draft-label", Label)
+            previous_button = self.query_one("#draft-prev", Button)
+            next_button = self.query_one("#draft-next", Button)
+            new_button = self.query_one("#draft-new", Button)
+        except Exception:
+            return
+        visible = self.current_exercise is not None and self._can_manage_freewrite_drafts()
+        toolbar.display = visible
+        if not visible:
+            return
+        entries = self._current_freewrite_entries()
+        count = len(entries)
+        current_index = next((index for index, entry in enumerate(entries) if entry.id == self.current_entry_id), 0)
+        current_entry = entries[current_index] if entries else None
+        if current_entry is None:
+            label.update("Draft 0 of 0")
+        else:
+            timestamp = current_entry.updated_at.astimezone().strftime("%Y-%m-%d %H:%M")
+            label.update(f"Draft {current_index + 1} of {count}  {timestamp}")
+        previous_button.disabled = count <= 1
+        next_button.disabled = count <= 1
+        new_button.disabled = False
 
     def _restore_saved_indicator(self) -> None:
         if not self._is_dirty():
