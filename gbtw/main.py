@@ -7,7 +7,7 @@ from textual import on
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.timer import Timer
@@ -277,23 +277,26 @@ class GBTWApp(App[None]):
         background: #1a1f22;
         color: #e8e6e3;
         border-top: solid #2f353b;
-        align: left middle;
+        layout: vertical;
     }
 
-    .button-row {
+    .button-row, #status-row {
         height: auto;
     }
 
-    #left-buttons, #right-status {
+    #left-buttons, #status-row {
         height: auto;
     }
 
-    #right-status {
-        width: 1fr;
+    #status-row Label {
+        margin-right: 2;
     }
 
     Button {
-        margin-right: 1;
+        min-width: 3;
+        width: auto;
+        padding: 0 1;
+        margin-right: 0;
     }
 
     Button.active-mode {
@@ -402,20 +405,21 @@ class GBTWApp(App[None]):
                     yield Static("", id="exercise-fallback-view")
             with Container(id="writing-pane"):
                 yield TextArea("", id="editor")
-        with Horizontal(id="bottom-bar"):
+        with Vertical(id="bottom-bar"):
             with Horizontal(id="left-buttons", classes="button-row"):
-                yield Button("Read", id="mode-read")
-                yield Button("Side", id="mode-side")
-                yield Button("Stack", id="mode-stack")
-                yield Button("Write", id="mode-write")
-                yield Button("Top", id="mode-top")
+                yield Button("Rd", id="mode-read")
+                yield Button("Sd", id="mode-side")
+                yield Button("St", id="mode-stack")
+                yield Button("Wr", id="mode-write")
+                yield Button("Tp", id="mode-top")
                 yield Static("|")
-                yield Button("←", id="previous-exercise")
-                yield Button("→", id="next-exercise")
-            with Horizontal(id="right-status", classes="button-row"):
-                yield Label("Wc: 0", id="word-count")
-                yield Label("Saved ✓", id="save-indicator", classes="saved")
+                yield Button("<", id="previous-exercise")
+                yield Button(">", id="next-exercise")
                 yield Button("?", id="help-button")
+            with Horizontal(id="status-row"):
+                yield Label("W:0", id="word-count")
+                yield Label("Saved ✓", id="save-indicator", classes="saved")
+                yield Label("F1-F5  Ctrl+E  Ctrl+H  Ctrl+T", id="shortcut-hint")
 
     async def on_mount(self) -> None:
         self.title = "gbtw"
@@ -472,14 +476,13 @@ class GBTWApp(App[None]):
         await self._create_new_session_entry()
 
     async def action_show_exercise_list(self) -> None:
-        selection = await self.push_screen_wait(
+        self.push_screen(
             ExerciseListScreen(
                 self.content_index,
                 self.current_exercise.exercise_id if self.current_exercise else None,
-            )
+            ),
+            callback=self._on_exercise_list_closed,
         )
-        if selection:
-            await self._open_exercise_by_id(selection)
 
     async def action_show_history(self) -> None:
         if self.current_exercise is None or not self.current_exercise.is_long_term:
@@ -487,14 +490,13 @@ class GBTWApp(App[None]):
             return
         assert self.database is not None
         entries = self.database.list_history(self.current_exercise.exercise_id)
-        selected = await self.push_screen_wait(HistoryScreen(self.current_exercise, entries))
-        if selected is not None:
-            await self.push_screen_wait(EntryPreviewScreen(selected))
+        self.push_screen(
+            HistoryScreen(self.current_exercise, entries),
+            callback=self._on_history_closed,
+        )
 
     async def action_show_sprint(self) -> None:
-        seconds = await self.push_screen_wait(SprintScreen())
-        if seconds:
-            self._start_sprint(seconds)
+        self.push_screen(SprintScreen(), callback=self._on_sprint_closed)
 
     async def action_toggle_focus(self) -> None:
         focused = self.focused
@@ -519,7 +521,7 @@ class GBTWApp(App[None]):
 
     async def on_key(self, event: events.Key) -> None:
         if event.key in {"question_mark", "?"}:
-            await self.push_screen_wait(HelpScreen())
+            self.push_screen(HelpScreen())
             event.stop()
 
     @on(Button.Pressed)
@@ -540,7 +542,7 @@ class GBTWApp(App[None]):
         elif button_id == "next-exercise":
             await self.action_next_exercise()
         elif button_id == "help-button":
-            await self.push_screen_wait(HelpScreen())
+            self.push_screen(HelpScreen())
 
     @on(TextArea.Changed, "#editor")
     def on_editor_changed(self, _: TextArea.Changed) -> None:
@@ -588,6 +590,18 @@ class GBTWApp(App[None]):
         editor.disabled = True
         self._set_save_indicator("Saved ✓", "saved")
         self._update_word_count()
+
+    def _on_exercise_list_closed(self, selection: str | None) -> None:
+        if selection:
+            self.run_worker(self._open_exercise_by_id(selection), exclusive=False)
+
+    def _on_history_closed(self, selected: EntryRecord | None) -> None:
+        if selected is not None:
+            self.push_screen(EntryPreviewScreen(selected))
+
+    def _on_sprint_closed(self, seconds: int | None) -> None:
+        if seconds:
+            self._start_sprint(seconds)
 
     async def _step_exercise(self, direction: int) -> None:
         if not self.content_index.exercises or self.current_exercise is None:
@@ -695,10 +709,10 @@ class GBTWApp(App[None]):
         label = self.query_one("#word-count", Label)
         if self._sprint_seconds_remaining > 0:
             minutes, seconds = divmod(self._sprint_seconds_remaining, 60)
-            label.update(f"Sprint: {minutes:02d}:{seconds:02d}")
+            label.update(f"T:{minutes:02d}:{seconds:02d}")
             return
         editor = self.query_one("#editor", TextArea)
-        label.update(f"Wc: {word_count(editor.text)}")
+        label.update(f"W:{word_count(editor.text)}")
 
     def _mark_dirty(self) -> None:
         self._set_save_indicator("Unsaved •", "unsaved")
