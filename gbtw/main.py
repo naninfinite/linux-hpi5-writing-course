@@ -4,6 +4,7 @@ import inspect
 from datetime import datetime
 
 from rich.markdown import Markdown
+from rich.text import Text
 from textual import on
 from textual import events
 from textual.app import App, ComposeResult
@@ -20,13 +21,14 @@ from .content import ContentIndex, Exercise, load_content_index
 from .db import Database, EntryRecord
 
 SIDE_RATIOS: tuple[tuple[int, int], ...] = ((40, 60), (50, 50), (60, 40))
-LAYOUTS = {"read", "side", "stack", "write"}
-WRITING_LAYOUTS = {"side", "stack", "write"}
+LAYOUTS = {"read", "side", "stack", "freewrite", "exercise"}
+WRITING_LAYOUTS = {"side", "stack", "freewrite", "exercise"}
 SHORTCUT_TEXT = """\
 F1  Reading mode
 F2  Side split
 F3  Stack split
-F4  Write mode
+F4  Freewrite mode
+F5  Exercise mode
 
 [   decrease split ratio
 ]   increase split ratio
@@ -37,7 +39,7 @@ Ctrl+S  save
 Ctrl+J  start new long-term session now
 
 Ctrl+E  exercise list
-Ctrl+H  history modal (long-term exercises)
+Ctrl+H  history modal (current section)
 Ctrl+T  timed writing sprint modal
 
 Tab     switch focus between panes
@@ -45,6 +47,26 @@ Tab     switch focus between panes
 
 Ctrl+Q  quit
 """
+
+TYPE_TITLE_STYLES = {
+    "reading": "bold #8fbcd4",
+    "exercise": "bold #e6d3a2",
+    "long-term": "bold #93c58f",
+}
+TYPE_COLORS = {
+    "reading": "#8fbcd4",
+    "exercise": "#e6d3a2",
+    "long-term": "#93c58f",
+}
+STATUS_COLORS = {
+    "optional": "#e9b96e",
+    "archived": "#7b8794",
+}
+PART_COLOR = "#d2c36b"
+MODULE_COLOR = "#b7c0c7"
+TEXT_COLOR = "#d9d5cf"
+MUTED_TEXT_COLOR = "#9dacb5"
+CURRENT_MARKER_COLOR = "#a9c3d3"
 
 
 def word_count(text: str) -> int:
@@ -232,7 +254,13 @@ class ExerciseListScreen(ModalScreen[str | None]):
         option_list = self.query_one("#exercise-list", OptionList)
         options: list[Option | None] = []
         for part, exercises in self.content_index.grouped_by_part(include_archived=self.show_archived).items():
-            options.append(Option(f"Part {part}", id=f"header:{part}", disabled=True))
+            options.append(
+                Option(
+                    Text(f"Part {part}", style=f"bold {PART_COLOR}"),
+                    id=f"header:{part}",
+                    disabled=True,
+                )
+            )
             current_module: str | None = None
             module_index = 0
             for exercise in exercises:
@@ -240,12 +268,20 @@ class ExerciseListScreen(ModalScreen[str | None]):
                     current_module = exercise.module
                     module_index += 1
                     options.append(
-                        Option(f"  {current_module}", id=f"module:{part}:{module_index}", disabled=True)
+                        Option(
+                            Text(f"  {current_module}", style=MODULE_COLOR),
+                            id=f"module:{part}:{module_index}",
+                            disabled=True,
+                        )
                     )
-                marker = " [optional]" if exercise.status == "optional" else ""
-                archived = " [archived]" if exercise.status == "archived" else ""
-                current = " *" if exercise.exercise_id == self.current_exercise_id else ""
-                label = f"    {exercise.title}{marker}{archived}{current}"
+                label = Text("    ")
+                label.append(exercise.title, style=TYPE_COLORS.get(exercise.type, TEXT_COLOR))
+                if exercise.status == "optional":
+                    label.append(" [optional]", style=STATUS_COLORS["optional"])
+                elif exercise.status == "archived":
+                    label.append(" [archived]", style=STATUS_COLORS["archived"])
+                if exercise.exercise_id == self.current_exercise_id:
+                    label.append(" *", style=f"bold {CURRENT_MARKER_COLOR}")
                 options.append(Option(label, id=f"exercise:{exercise.exercise_id}"))
         option_list.clear_options()
         option_list.add_options(options)
@@ -313,6 +349,7 @@ class GBTWApp(App[None]):
 
     #exercise-title {
         text-style: bold;
+        color: #e7dfcf;
     }
 
     #exercise-meta {
@@ -366,6 +403,10 @@ class GBTWApp(App[None]):
         margin-left: 2;
     }
 
+    #word-count {
+        color: #a9c3d3;
+    }
+
     Button {
         margin-right: 1;
     }
@@ -408,6 +449,18 @@ class GBTWApp(App[None]):
         color: #ef6b73;
     }
 
+    #show-exercises {
+        color: #8fbcd4;
+    }
+
+    #previous-exercise, #next-exercise {
+        color: #d2c36b;
+    }
+
+    #help-button {
+        color: #b7c0c7;
+    }
+
     #modal {
         width: 72;
         max-width: 90%;
@@ -424,12 +477,59 @@ class GBTWApp(App[None]):
     }
 
     .modal-title {
+        color: #d2c36b;
         text-style: bold;
         margin-bottom: 1;
     }
 
     #help-text, #preview-scroll, #history-list, #exercise-list {
         height: 1fr;
+    }
+
+    #help-text {
+        color: #ddd7cf;
+    }
+
+    #exercise-list-hint, #history-empty {
+        color: #9dacb5;
+    }
+
+    #preview-body {
+        color: #e3ded7;
+    }
+
+    OptionList {
+        background: #171d21;
+        border: tall #4d5a63;
+        color: #d9d5cf;
+    }
+
+    OptionList:focus {
+        border: tall #6c7d89;
+        background-tint: #d9d5cf 2%;
+    }
+
+    OptionList > .option-list--option {
+        color: #d9d5cf;
+    }
+
+    OptionList > .option-list--option-disabled {
+        color: #93a3ad;
+        text-style: bold;
+    }
+
+    OptionList > .option-list--option-highlighted {
+        background: #d2c36b;
+        color: #171717;
+        text-style: bold;
+    }
+
+    OptionList > .option-list--option-hover {
+        background: #283137;
+    }
+
+    OptionList > .option-list--separator {
+        color: #51606b;
     }
 
     #history-empty {
@@ -445,7 +545,8 @@ class GBTWApp(App[None]):
         Binding("f1", "set_mode('read')", "Read", show=False),
         Binding("f2", "set_mode('side')", "Side", show=False),
         Binding("f3", "set_mode('stack')", "Stack", show=False),
-        Binding("f4", "set_mode('write')", "Write", show=False),
+        Binding("f4", "set_mode('freewrite')", "Freewrite", show=False),
+        Binding("f5", "set_mode('exercise')", "Exercise", show=False),
         Binding("[", "decrease_split", "Split -", show=False),
         Binding("]", "increase_split", "Split +", show=False),
         Binding("ctrl+n", "next_exercise", "Next", show=False),
@@ -502,7 +603,8 @@ class GBTWApp(App[None]):
                 yield FooterControl("Read", control_id="mode-read")
                 yield FooterControl("Side", control_id="mode-side")
                 yield FooterControl("Stack", control_id="mode-stack")
-                yield FooterControl("Write", control_id="mode-write")
+                yield FooterControl("Freewrite", control_id="mode-freewrite")
+                yield FooterControl("Exercise", control_id="mode-exercise")
                 yield Static("|")
                 yield FooterControl("Exercises", control_id="show-exercises")
                 yield FooterControl("<", control_id="previous-exercise")
@@ -525,12 +627,27 @@ class GBTWApp(App[None]):
     async def action_set_mode(self, mode: str) -> None:
         if mode not in LAYOUTS:
             return
-        if mode in WRITING_LAYOUTS and not self._can_write_current_exercise():
+        if not self._can_use_mode(mode):
             self.bell()
             return
+        previous_draft_kind = self._current_draft_kind()
         assert self.database is not None
         self.current_layout_mode = mode
         self.database.set_preference("last_mode", self.current_layout_mode)
+        if (
+            self.current_exercise is not None
+            and self._exercise_supports_writing(self.current_exercise)
+            and previous_draft_kind != self._current_draft_kind()
+        ):
+            if self._is_dirty():
+                await self._save_current_entry("switch")
+            self._load_entry_into_editor(
+                self.current_exercise,
+                self.database.resolve_entry_for_exercise(
+                    self.current_exercise,
+                    self._current_draft_kind(),
+                ),
+            )
         self._apply_layout()
         if self._effective_layout_mode() == "read":
             self._focus_exercise()
@@ -581,7 +698,10 @@ class GBTWApp(App[None]):
             self.bell()
             return
         assert self.database is not None
-        entries = self.database.list_history(self.current_exercise.exercise_id)
+        entries = self.database.list_history(
+            self.current_exercise.exercise_id,
+            self._current_draft_kind(),
+        )
         self.push_screen(
             HistoryScreen(self.current_exercise, entries),
             callback=self._on_history_closed,
@@ -596,6 +716,9 @@ class GBTWApp(App[None]):
     async def action_toggle_focus(self) -> None:
         if not self._can_write_current_exercise():
             self._focus_exercise()
+            return
+        if self._effective_layout_mode() in {"freewrite", "exercise"}:
+            self._focus_editor()
             return
         focused = self.focused
         editor = self.query_one("#editor", TextArea)
@@ -631,8 +754,10 @@ class GBTWApp(App[None]):
             await self.action_set_mode("side")
         elif control_id == "mode-stack":
             await self.action_set_mode("stack")
-        elif control_id == "mode-write":
-            await self.action_set_mode("write")
+        elif control_id == "mode-freewrite":
+            await self.action_set_mode("freewrite")
+        elif control_id == "mode-exercise":
+            await self.action_set_mode("exercise")
         elif control_id == "show-exercises":
             await self.action_show_exercise_list()
         elif control_id == "previous-exercise":
@@ -655,6 +780,8 @@ class GBTWApp(App[None]):
     def _restore_preferences(self) -> None:
         assert self.database is not None
         last_mode = self.database.get_preference("last_mode")
+        if last_mode == "write":
+            last_mode = "freewrite"
         if last_mode in LAYOUTS:
             self.current_layout_mode = last_mode
         ratio = self.database.get_preference("last_split_ratio")
@@ -725,20 +852,12 @@ class GBTWApp(App[None]):
         self.current_exercise = target
         assert self.database is not None
         self.database.set_preference("last_exercise_id", target.exercise_id)
-        self.current_entry_id = None
-        record = self.database.resolve_entry_for_exercise(target)
-        self.current_entry_id = record.id
         self._update_exercise_header(target)
-        self.query_one("#editor", TextArea).disabled = not self._exercise_supports_writing(target)
         await self._update_exercise_markdown(target.body)
-        self._loading_editor = True
-        self._ignored_loaded_text = record.content
-        self.query_one("#editor", TextArea).load_text(record.content)
-        self._loading_editor = False
-        self._set_save_indicator("Saved ✓", "saved")
-        self._update_word_count()
+        record = self.database.resolve_entry_for_exercise(target, self._draft_kind_for_exercise(target))
+        self._load_entry_into_editor(target, record)
         self._update_bottom_bar()
-        if self._effective_layout_mode() == "read":
+        if self._effective_layout_mode(target) == "read":
             self._focus_exercise()
         else:
             self._focus_editor()
@@ -749,10 +868,22 @@ class GBTWApp(App[None]):
             meta = self.query_one("#exercise-meta", Label)
         except Exception:
             return
-        title.update(exercise.title)
+        title_style = TYPE_TITLE_STYLES.get(exercise.type, "bold #e7dfcf")
+        title.update(Text(exercise.title, style=title_style))
+
         type_label = "Long-term" if exercise.type == "long-term" else exercise.type.title()
-        status_label = f" [{exercise.status}]" if exercise.status != "active" else ""
-        meta.update(f"Part {exercise.part}  {exercise.module}  {type_label}{status_label}")
+        type_style = TYPE_COLORS.get(exercise.type, "#c7d0d6")
+        status_style = STATUS_COLORS.get(exercise.status, "#7b8794")
+        meta_text = Text()
+        meta_text.append(f"Part {exercise.part}", style=f"bold {PART_COLOR}")
+        meta_text.append("  ")
+        meta_text.append(exercise.module, style=MODULE_COLOR)
+        meta_text.append("  ")
+        meta_text.append(type_label, style=type_style)
+        if exercise.status != "active":
+            meta_text.append("  ")
+            meta_text.append(f"[{exercise.status}]", style=status_style)
+        meta.update(meta_text)
 
     async def _update_exercise_markdown(self, markdown_text: str) -> None:
         viewer = self.query_one("#exercise-markdown", MarkdownViewer)
@@ -790,7 +921,7 @@ class GBTWApp(App[None]):
             writing_pane.display = False
             exercise_pane.styles.width = "100%"
             exercise_pane.styles.height = "100%"
-        elif layout_mode == "write":
+        elif layout_mode in {"freewrite", "exercise"}:
             workspace.styles.layout = "vertical"
             exercise_pane.display = False
             writing_pane.display = True
@@ -819,27 +950,84 @@ class GBTWApp(App[None]):
             "mode-read": "read",
             "mode-side": "side",
             "mode-stack": "stack",
-            "mode-write": "write",
+            "mode-freewrite": "freewrite",
+            "mode-exercise": "exercise",
         }
         effective_mode = self._effective_layout_mode()
         can_write = self._can_write_current_exercise()
+        can_use_exercise_mode = self._exercise_mode_available(self.current_exercise)
         for control_id, mode in mapping.items():
             control = self.query_one(f"#{control_id}", FooterControl)
             control.set_class(mode == effective_mode, "active-mode")
-            if mode in WRITING_LAYOUTS:
+            if mode == "exercise":
+                control.set_disabled(not can_use_exercise_mode)
+            elif mode in WRITING_LAYOUTS:
                 control.set_disabled(not can_write)
         self._update_word_count()
 
     def _exercise_supports_writing(self, exercise: Exercise | None) -> bool:
         return exercise is not None and exercise.type != "reading"
 
-    def _can_write_current_exercise(self) -> bool:
-        return self.current_exercise is None or self._exercise_supports_writing(self.current_exercise)
+    def _exercise_mode_available(self, exercise: Exercise | None) -> bool:
+        return self._exercise_supports_writing(exercise) and bool(exercise.guided_questions)
 
-    def _effective_layout_mode(self) -> str:
-        if self.current_layout_mode in WRITING_LAYOUTS and not self._can_write_current_exercise():
+    def _can_write_current_exercise(self) -> bool:
+        return self._exercise_supports_writing(self.current_exercise)
+
+    def _can_use_mode(self, mode: str, exercise: Exercise | None = None) -> bool:
+        target = self.current_exercise if exercise is None else exercise
+        if mode == "exercise":
+            return self._exercise_mode_available(target)
+        if mode in WRITING_LAYOUTS:
+            return self._exercise_supports_writing(target)
+        return mode in LAYOUTS
+
+    def _effective_layout_mode(self, exercise: Exercise | None = None) -> str:
+        target = self.current_exercise if exercise is None else exercise
+        if self.current_layout_mode == "exercise":
+            if self._exercise_mode_available(target):
+                return "exercise"
+            if self._exercise_supports_writing(target):
+                return "freewrite"
+            return "read"
+        if self.current_layout_mode in WRITING_LAYOUTS and not self._exercise_supports_writing(target):
             return "read"
         return self.current_layout_mode
+
+    def _current_draft_kind(self) -> str:
+        return self._draft_kind_for_exercise(self.current_exercise)
+
+    def _draft_kind_for_exercise(self, exercise: Exercise | None) -> str:
+        return "exercise" if self._effective_layout_mode(exercise) == "exercise" else "freewrite"
+
+    def _load_entry_into_editor(self, exercise: Exercise, record: EntryRecord) -> None:
+        self.current_entry_id = record.id
+        editor = self.query_one("#editor", TextArea)
+        editor.disabled = not self._exercise_supports_writing(exercise)
+        loaded_text = self._editor_text_for_record(exercise, record)
+        self._loading_editor = True
+        self._ignored_loaded_text = loaded_text
+        editor.load_text(loaded_text)
+        self._loading_editor = False
+        self._set_save_indicator("Saved ✓", "saved")
+        self._update_word_count()
+
+    def _editor_text_for_record(self, exercise: Exercise, record: EntryRecord) -> str:
+        if record.content:
+            return record.content
+        if record.draft_kind == "exercise" and exercise.guided_questions:
+            return self._build_guided_scaffold(exercise.guided_questions)
+        return ""
+
+    def _build_guided_scaffold(self, questions: tuple[str, ...]) -> str:
+        lines: list[str] = []
+        for index, question in enumerate(questions, start=1):
+            if index > 1:
+                lines.append("")
+            lines.append(f"{index}. {question}")
+            lines.append("Answer:")
+            lines.append("")
+        return "\n".join(lines).rstrip()
 
     def _update_word_count(self) -> None:
         label = self.query_one("#word-count", Label)
@@ -891,14 +1079,12 @@ class GBTWApp(App[None]):
         if self.current_exercise is None:
             return
         assert self.database is not None
-        record = self.database.create_entry(self.current_exercise.exercise_id, "")
-        self.current_entry_id = record.id
-        self._loading_editor = True
-        self._ignored_loaded_text = ""
-        self.query_one("#editor", TextArea).load_text("")
-        self._loading_editor = False
-        self._set_save_indicator("Saved ✓", "saved")
-        self._update_word_count()
+        record = self.database.create_entry(
+            self.current_exercise.exercise_id,
+            self._current_draft_kind(),
+            "",
+        )
+        self._load_entry_into_editor(self.current_exercise, record)
         self._focus_editor()
 
     def _restore_saved_indicator(self) -> None:
