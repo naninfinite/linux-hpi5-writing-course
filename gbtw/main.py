@@ -8,6 +8,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.timer import Timer
@@ -24,7 +25,6 @@ F1  Reading mode
 F2  Side split
 F3  Stack split
 F4  Write mode
-F5  Top mode (alias of Stack)
 
 [   decrease split ratio
 ]   increase split ratio
@@ -232,6 +232,23 @@ class ExerciseListScreen(ModalScreen[str | None]):
         option_list.add_options(options)
 
 
+class FooterControl(Static):
+    can_focus = False
+
+    class Pressed(Message):
+        def __init__(self, control_id: str) -> None:
+            super().__init__()
+            self.control_id = control_id
+
+    def __init__(self, label: str, *, control_id: str) -> None:
+        super().__init__(label, id=control_id, classes="footer-control")
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        if self.id is not None:
+            self.post_message(self.Pressed(self.id))
+
+
 class GBTWApp(App[None]):
     CSS = """
     Screen {
@@ -266,9 +283,27 @@ class GBTWApp(App[None]):
         height: 1fr;
     }
 
+    #writing-pane {
+        layout: vertical;
+    }
+
     #editor {
         height: 1fr;
         background: #0f1519;
+    }
+
+    #editor-status {
+        height: auto;
+        dock: bottom;
+        align-horizontal: right;
+        padding: 0 1;
+        background: #151b1f;
+        color: #d7d7d7;
+        border-top: solid #2a3238;
+    }
+
+    #editor-status Label {
+        margin-left: 2;
     }
 
     #bottom-bar {
@@ -277,26 +312,35 @@ class GBTWApp(App[None]):
         background: #1a1f22;
         color: #e8e6e3;
         border-top: solid #2f353b;
-        layout: vertical;
+        layout: horizontal;
     }
 
-    .button-row, #status-row {
+    .button-row {
         height: auto;
     }
 
-    #left-buttons, #status-row {
-        height: auto;
-    }
-
-    #status-row Label {
-        margin-right: 2;
+    #left-buttons {
+        width: 1fr;
     }
 
     Button {
-        min-width: 3;
+        margin-right: 1;
+    }
+
+    .footer-control {
         width: auto;
+        min-width: 2;
+        height: auto;
         padding: 0 1;
         margin-right: 0;
+        color: #dad7d2;
+        background: transparent;
+    }
+
+    .footer-control.active-mode {
+        background: #d2c36b;
+        color: #171717;
+        text-style: bold;
     }
 
     Button.active-mode {
@@ -355,7 +399,6 @@ class GBTWApp(App[None]):
         Binding("f2", "set_mode('side')", "Side", show=False),
         Binding("f3", "set_mode('stack')", "Stack", show=False),
         Binding("f4", "set_mode('write')", "Write", show=False),
-        Binding("f5", "top_mode", "Top", show=False),
         Binding("[", "decrease_split", "Split -", show=False),
         Binding("]", "increase_split", "Split +", show=False),
         Binding("ctrl+n", "next_exercise", "Next", show=False),
@@ -405,21 +448,19 @@ class GBTWApp(App[None]):
                     yield Static("", id="exercise-fallback-view")
             with Container(id="writing-pane"):
                 yield TextArea("", id="editor")
-        with Vertical(id="bottom-bar"):
+                with Horizontal(id="editor-status"):
+                    yield Label("Word count: 0", id="word-count")
+                    yield Label("Saved ✓", id="save-indicator", classes="saved")
+        with Horizontal(id="bottom-bar"):
             with Horizontal(id="left-buttons", classes="button-row"):
-                yield Button("Rd", id="mode-read")
-                yield Button("Sd", id="mode-side")
-                yield Button("St", id="mode-stack")
-                yield Button("Wr", id="mode-write")
-                yield Button("Tp", id="mode-top")
+                yield FooterControl("Read", control_id="mode-read")
+                yield FooterControl("Side", control_id="mode-side")
+                yield FooterControl("Stack", control_id="mode-stack")
+                yield FooterControl("Write", control_id="mode-write")
                 yield Static("|")
-                yield Button("<", id="previous-exercise")
-                yield Button(">", id="next-exercise")
-                yield Button("?", id="help-button")
-            with Horizontal(id="status-row"):
-                yield Label("W:0", id="word-count")
-                yield Label("Saved ✓", id="save-indicator", classes="saved")
-                yield Label("F1-F5  Ctrl+E  Ctrl+H  Ctrl+T", id="shortcut-hint")
+                yield FooterControl("<", control_id="previous-exercise")
+                yield FooterControl(">", control_id="next-exercise")
+                yield FooterControl("?", control_id="help-button")
 
     async def on_mount(self) -> None:
         self.title = "gbtw"
@@ -440,10 +481,6 @@ class GBTWApp(App[None]):
         self._apply_layout()
         if mode != "read":
             self._focus_editor()
-
-    async def action_top_mode(self) -> None:
-        await self.action_set_mode("stack")
-        self._focus_exercise()
 
     async def action_decrease_split(self) -> None:
         assert self.database is not None
@@ -524,24 +561,22 @@ class GBTWApp(App[None]):
             self.push_screen(HelpScreen())
             event.stop()
 
-    @on(Button.Pressed)
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
-        button_id = event.button.id
-        if button_id == "mode-read":
+    @on(FooterControl.Pressed)
+    async def on_footer_control_pressed(self, event: FooterControl.Pressed) -> None:
+        control_id = event.control_id
+        if control_id == "mode-read":
             await self.action_set_mode("read")
-        elif button_id == "mode-side":
+        elif control_id == "mode-side":
             await self.action_set_mode("side")
-        elif button_id == "mode-stack":
+        elif control_id == "mode-stack":
             await self.action_set_mode("stack")
-        elif button_id == "mode-write":
+        elif control_id == "mode-write":
             await self.action_set_mode("write")
-        elif button_id == "mode-top":
-            await self.action_top_mode()
-        elif button_id == "previous-exercise":
+        elif control_id == "previous-exercise":
             await self.action_previous_exercise()
-        elif button_id == "next-exercise":
+        elif control_id == "next-exercise":
             await self.action_next_exercise()
-        elif button_id == "help-button":
+        elif control_id == "help-button":
             self.push_screen(HelpScreen())
 
     @on(TextArea.Changed, "#editor")
@@ -699,20 +734,19 @@ class GBTWApp(App[None]):
             "mode-stack": "stack",
             "mode-write": "write",
         }
-        for button_id, mode in mapping.items():
-            button = self.query_one(f"#{button_id}", Button)
-            button.set_class(mode == self.current_layout_mode, "active-mode")
-        self.query_one("#mode-top", Button).set_class(False, "active-mode")
+        for control_id, mode in mapping.items():
+            control = self.query_one(f"#{control_id}", FooterControl)
+            control.set_class(mode == self.current_layout_mode, "active-mode")
         self._update_word_count()
 
     def _update_word_count(self) -> None:
         label = self.query_one("#word-count", Label)
         if self._sprint_seconds_remaining > 0:
             minutes, seconds = divmod(self._sprint_seconds_remaining, 60)
-            label.update(f"T:{minutes:02d}:{seconds:02d}")
+            label.update(f"Sprint: {minutes:02d}:{seconds:02d}")
             return
         editor = self.query_one("#editor", TextArea)
-        label.update(f"W:{word_count(editor.text)}")
+        label.update(f"Word count: {word_count(editor.text)}")
 
     def _mark_dirty(self) -> None:
         self._set_save_indicator("Unsaved •", "unsaved")

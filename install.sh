@@ -7,7 +7,8 @@ DATA_ROOT="${HOME}/.local/share/gbtw"
 VENV_DIR="${ROOT_DIR}/.venv"
 
 python3 -m venv "${VENV_DIR}"
-"${VENV_DIR}/bin/pip" install "${ROOT_DIR}"
+env PYTHONPATH=/usr/lib/python3/dist-packages \
+  "${VENV_DIR}/bin/pip" install --no-build-isolation --editable "${ROOT_DIR}"
 
 mkdir -p \
   "${CONTENT_ROOT}/part1" \
