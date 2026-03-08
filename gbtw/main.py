@@ -269,10 +269,28 @@ class GBTWApp(App[None]):
 
     #exercise-pane {
         background: #1a2024;
+        layout: vertical;
     }
 
     #writing-pane {
         background: #0f1519;
+    }
+
+    #exercise-header {
+        height: auto;
+        padding: 0 1;
+        margin-bottom: 1;
+        background: #20282d;
+        color: #d9d5cf;
+        border-bottom: solid #31393f;
+    }
+
+    #exercise-title {
+        text-style: bold;
+    }
+
+    #exercise-meta {
+        color: #aeb6bb;
     }
 
     #exercise-markdown, #exercise-fallback {
@@ -435,6 +453,8 @@ class GBTWApp(App[None]):
     def compose(self) -> ComposeResult:
         with Container(id="workspace"):
             with Container(id="exercise-pane"):
+                yield Label("", id="exercise-title")
+                yield Label("", id="exercise-meta")
                 yield MarkdownViewer("", id="exercise-markdown", show_table_of_contents=False)
                 with VerticalScroll(id="exercise-fallback"):
                     yield Static("", id="exercise-fallback-view")
@@ -447,6 +467,7 @@ class GBTWApp(App[None]):
                 yield FooterControl("Stack", control_id="mode-stack")
                 yield FooterControl("Write", control_id="mode-write")
                 yield Static("|")
+                yield FooterControl("Exercises", control_id="show-exercises")
                 yield FooterControl("<", control_id="previous-exercise")
                 yield FooterControl(">", control_id="next-exercise")
                 yield FooterControl("?", control_id="help-button")
@@ -564,6 +585,8 @@ class GBTWApp(App[None]):
             await self.action_set_mode("stack")
         elif control_id == "mode-write":
             await self.action_set_mode("write")
+        elif control_id == "show-exercises":
+            await self.action_show_exercise_list()
         elif control_id == "previous-exercise":
             await self.action_previous_exercise()
         elif control_id == "next-exercise":
@@ -608,6 +631,8 @@ class GBTWApp(App[None]):
     async def _show_empty_state(self) -> None:
         self.current_exercise = None
         self.current_entry_id = None
+        self.query_one("#exercise-title", Label).update("No exercises found")
+        self.query_one("#exercise-meta", Label).update("Run install.sh to create sample content.")
         await self._update_exercise_markdown("# No exercises found\n\nRun install.sh to create sample content.")
         editor = self.query_one("#editor", TextArea)
         self._loading_editor = True
@@ -655,6 +680,7 @@ class GBTWApp(App[None]):
         self.current_entry_id = None
         record = self.database.resolve_entry_for_exercise(target)
         self.current_entry_id = record.id
+        self._update_exercise_header(target)
         self.query_one("#editor", TextArea).disabled = False
         await self._update_exercise_markdown(target.body)
         self._loading_editor = True
@@ -666,6 +692,17 @@ class GBTWApp(App[None]):
         self._update_bottom_bar()
         if self.current_layout_mode != "read":
             self._focus_editor()
+
+    def _update_exercise_header(self, exercise: Exercise) -> None:
+        try:
+            title = self.query_one("#exercise-title", Label)
+            meta = self.query_one("#exercise-meta", Label)
+        except Exception:
+            return
+        title.update(exercise.title)
+        type_label = "Long-term" if exercise.type == "long-term" else exercise.type.title()
+        status_label = f" [{exercise.status}]" if exercise.status != "active" else ""
+        meta.update(f"Part {exercise.part}  {exercise.module}  {type_label}{status_label}")
 
     async def _update_exercise_markdown(self, markdown_text: str) -> None:
         viewer = self.query_one("#exercise-markdown", MarkdownViewer)
