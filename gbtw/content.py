@@ -24,6 +24,8 @@ _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
 _UNORDERED_LIST_RE = re.compile(r"^(\s{0,3}[-+*]\s+)(.*)$")
 _ORDERED_LIST_RE = re.compile(r"^(\s{0,3}\d+\.\s+)(.*)$")
 _BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?")
+_BOX_TABLE_BORDER_RE = re.compile(r"^\+-{3,}\+\s*$")
+_BOX_TABLE_ROW_RE = re.compile(r"^\|(.*)\|\s*$")
 
 
 @dataclass(slots=True, frozen=True)
@@ -236,6 +238,7 @@ def _normalize_markdown_content(markdown_text: str) -> str:
     lines = _collapse_repeated_horizontal_rules(lines)
     lines = _strip_leading_horizontal_rules(lines)
     lines = _rewrite_pseudo_table_blocks(lines)
+    lines = _rewrite_box_table_blocks(lines)
     lines = _reflow_wrapped_blocks(lines)
     lines = _collapse_repeated_horizontal_rules(lines)
     lines = _collapse_blank_runs(lines)
@@ -350,6 +353,31 @@ def _collapse_blank_runs(lines: list[str]) -> list[str]:
     return compacted
 
 
+def _rewrite_box_table_blocks(lines: list[str]) -> list[str]:
+    rewritten: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not _BOX_TABLE_BORDER_RE.match(lines[index]):
+            rewritten.append(lines[index])
+            index += 1
+            continue
+        end = index + 1
+        while end < len(lines):
+            if _BOX_TABLE_BORDER_RE.match(lines[end]):
+                end += 1
+                break
+            end += 1
+        converted = _format_box_table_block(lines[index:end])
+        if converted:
+            if rewritten and rewritten[-1] != "":
+                rewritten.append("")
+            rewritten.extend(converted)
+        else:
+            rewritten.extend(lines[index:end])
+        index = end
+    return rewritten
+
+
 def _reflow_wrapped_blocks(lines: list[str]) -> list[str]:
     reflowed: list[str] = []
     paragraph_parts: list[str] = []
@@ -405,6 +433,34 @@ def _reflow_wrapped_blocks(lines: list[str]) -> list[str]:
     flush_paragraph()
     flush_list_item()
     return reflowed
+
+
+def _format_box_table_block(lines: list[str]) -> list[str]:
+    row_text: list[str] = []
+    for line in lines:
+        match = _BOX_TABLE_ROW_RE.match(line)
+        if not match:
+            continue
+        row_text.append(match.group(1).strip())
+    if not row_text:
+        return []
+    paragraphs: list[str] = []
+    current_parts: list[str] = []
+    for row in row_text:
+        if not row:
+            if current_parts:
+                paragraphs.append(_join_wrapped_parts(current_parts))
+                current_parts = []
+            continue
+        current_parts.append(row)
+    if current_parts:
+        paragraphs.append(_join_wrapped_parts(current_parts))
+    formatted: list[str] = []
+    for index, paragraph in enumerate(paragraphs):
+        if index:
+            formatted.append("")
+        formatted.append(paragraph)
+    return formatted
 
 
 def _is_structural_line(line: str) -> bool:
