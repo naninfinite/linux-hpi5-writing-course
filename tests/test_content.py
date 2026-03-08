@@ -138,6 +138,120 @@ What else might matter here?
             ),
         )
 
+    def test_load_content_index_keeps_valid_project_group_metadata(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "part2").mkdir()
+            (root / "part2" / "a.md").write_text(
+                """---
+title: Planning
+part: 2
+module: Novel
+type: exercise
+project_key: part2-novel
+project_title: Part 2 Novel
+project_seed: true
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            (root / "part2" / "b.md").write_text(
+                """---
+title: Reading
+part: 2
+module: Novel
+type: reading
+project_key: part2-novel
+project_title: Part 2 Novel
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            index = load_content_index(root)
+
+        self.assertEqual(index.warnings, ())
+        self.assertEqual(index.project_seed("part2-novel").exercise_id, "part2/a.md")
+        self.assertEqual(index.get("part2/b.md").project_title, "Part 2 Novel")
+
+    def test_load_content_index_disables_invalid_project_group(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "part2").mkdir()
+            (root / "part2" / "a.md").write_text(
+                """---
+title: First
+part: 2
+module: Novel
+type: exercise
+project_key: part2-novel
+project_title: Novel A
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            (root / "part2" / "b.md").write_text(
+                """---
+title: Second
+part: 2
+module: Novel
+type: long-term
+save_mode: project
+project_key: part2-novel
+project_title: Novel B
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            index = load_content_index(root)
+
+        self.assertEqual(len(index.warnings), 1)
+        self.assertIsNone(index.get("part2/a.md").project_key)
+        self.assertIsNone(index.get("part2/b.md").project_key)
+
+    def test_load_content_index_requires_seed_for_multi_doc_project_group(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "part4").mkdir()
+            (root / "part4" / "a.md").write_text(
+                """---
+title: Studio
+part: 4
+module: Portfolio
+type: long-term
+save_mode: project
+project_key: part4-portfolio
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            (root / "part4" / "b.md").write_text(
+                """---
+title: Reading
+part: 4
+module: Portfolio
+type: reading
+project_key: part4-portfolio
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            index = load_content_index(root)
+
+        self.assertEqual(len(index.warnings), 1)
+        self.assertIsNone(index.get("part4/a.md").project_key)
+
     def test_load_content_index_normalizes_pseudo_table_intro_blocks(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
