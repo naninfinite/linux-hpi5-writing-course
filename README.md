@@ -11,7 +11,7 @@ Getting Back to Writing is a Textual TUI for working through a structured writin
 - `Project` opens a shared long-form manuscript for any document linked to a `project_key`.
 
 `Freewrite` and `Exercise` save independently for the same exercise, so switching between them does not overwrite or mix drafts. `Project` is separate again: it is shared across all linked documents for the same project track.
-Freewrite-backed layouts also show draft controls inside the writing pane so you can create another draft and cycle between saved drafts for the current exercise.
+Freewrite-backed layouts also show a compact draft bar inside the writing pane so you can create, cycle, delete, and undo deleted drafts for the current exercise.
 
 ## Run
 
@@ -35,7 +35,7 @@ Use this on the target Ubuntu ARM64 box after a clean install:
 3. Use `[` and `]` in side mode; confirm the split cycles through `40/60`, `50/50`, and `60/40`.
 4. Type in the editor; confirm live word count updates and autosave changes `Unsaved •` to `Saved ✓` after idle time.
 5. Switch between `Freewrite` and `Exercise`; confirm each mode restores its own draft and `Exercise` scaffolds blank answer drafts from guided questions.
-6. In a freewrite-backed layout, use the draft controls to create two drafts; confirm previous/next switches between them, dirty text saves before switching, and returning to the exercise restores the selected draft.
+6. In a freewrite-backed layout, use the draft controls to create two drafts; confirm previous/next switches between them, dirty text saves before switching, `Del` removes the current draft, `Undo` restores it, and returning to the exercise restores the selected draft.
 7. Switch exercises with dirty text; confirm the current section draft is preserved and the selected exercise restores its latest or currently selected draft for that section.
 8. Open `Project` on two linked documents with the same `project_key`; confirm both reopen the same shared manuscript and switching between them does not fork the project text.
 9. Open `Project` on an unlinked document; confirm the control is disabled and the app falls back to `Freewrite` or `Read` when appropriate.
