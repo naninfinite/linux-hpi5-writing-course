@@ -45,6 +45,7 @@ class HarnessApp(GBTWApp):
         self.word_count_value = 0
         self.bell_count = 0
         self.pending_tasks: list[asyncio.Task[object]] = []
+        self.pushed_screen = None
 
     def query_one(self, selector: str, expected_type=None):  # type: ignore[override]
         if selector == "#editor":
@@ -88,6 +89,10 @@ class HarnessApp(GBTWApp):
         task = asyncio.create_task(work)
         self.pending_tasks.append(task)
         return task
+
+    def push_screen(self, screen, callback=None, *args, **kwargs):  # type: ignore[override]
+        self.pushed_screen = screen
+        return None
 
     async def wait_for_workers(self) -> None:
         if not self.pending_tasks:
@@ -159,8 +164,8 @@ Body
             await app.wait_for_workers()
 
             self.assertEqual(app.current_entry_id, first_entry_id)
-            self.assertEqual(len(db.list_history("part1/a.md")), 1)
-            self.assertEqual(db.get_latest_entry("part1/a.md").content, "hello world")
+            self.assertEqual(len(db.list_history("part1/a.md", "freewrite")), 1)
+            self.assertEqual(db.get_latest_entry("part1/a.md", "freewrite").content, "hello world")
             self.assertEqual(app._save_indicator_state, "saved")
             db.close()
 
@@ -200,7 +205,7 @@ Body B
             app._set_save_indicator("Unsaved •", "unsaved")
 
             await app._open_exercise_by_id("part1/b.md")
-            self.assertEqual(db.get_latest_entry("part1/a.md").content, "draft a")
+            self.assertEqual(db.get_latest_entry("part1/a.md", "freewrite").content, "draft a")
             self.assertEqual(app.current_exercise.exercise_id, "part1/b.md")
             self.assertEqual(app.editor.text, "")
 
@@ -208,7 +213,7 @@ Body B
             app._set_save_indicator("Unsaved •", "unsaved")
             await app._open_exercise_by_id("part1/a.md")
 
-            self.assertEqual(db.get_latest_entry("part1/b.md").content, "draft b")
+            self.assertEqual(db.get_latest_entry("part1/b.md", "freewrite").content, "draft b")
             self.assertEqual(app.current_exercise.exercise_id, "part1/a.md")
             self.assertEqual(app.editor.text, "draft a")
             db.close()
@@ -251,7 +256,7 @@ Body
             await app.action_new_session_now()
 
             self.assertNotEqual(app.current_entry_id, first_session_entry)
-            self.assertEqual(len(db.list_history("part1/session.md")), 2)
+            self.assertEqual(len(db.list_history("part1/session.md", "freewrite")), 2)
             self.assertEqual(app.editor.text, "")
 
             await app._open_exercise_by_id("part1/project.md", save_current=False)
@@ -259,7 +264,7 @@ Body
             await app.action_new_session_now()
 
             self.assertEqual(app.current_entry_id, first_project_entry)
-            self.assertEqual(len(db.list_history("part1/project.md")), 1)
+            self.assertEqual(len(db.list_history("part1/project.md", "freewrite")), 1)
             self.assertEqual(app.bell_count, 1)
             db.close()
 
@@ -306,7 +311,7 @@ Body
 
             self.assertEqual(app.current_entry_id, first_project_entry)
             self.assertEqual(app.editor.text, "ongoing draft")
-            self.assertEqual(len(db.list_history("part1/project.md")), 1)
+            self.assertEqual(len(db.list_history("part1/project.md", "freewrite")), 1)
             db.close()
 
     async def test_layout_and_split_changes_persist_preferences(self) -> None:
@@ -365,13 +370,13 @@ Body
             self.assertEqual(app._effective_layout_mode(), "read")
             self.assertEqual(app.focus_target, "exercise")
 
-            await app.action_set_mode("write")
+            await app.action_set_mode("freewrite")
 
             self.assertEqual(app.current_layout_mode, "side")
             self.assertEqual(app.bell_count, 1)
             db.close()
 
-    async def test_writing_exercises_reenable_editor_layouts(self) -> None:
+    async def test_freewrite_mode_reenables_editor_layouts(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "content"
             (root / "part1").mkdir(parents=True)
@@ -404,12 +409,194 @@ Prompt
 
             await app._open_exercise_by_id("part1/reading.md", save_current=False)
             await app._open_exercise_by_id("part1/exercise.md", save_current=False)
-            await app.action_set_mode("write")
+            await app.action_set_mode("freewrite")
 
             self.assertFalse(app.editor.disabled)
-            self.assertEqual(app.current_layout_mode, "write")
-            self.assertEqual(app._effective_layout_mode(), "write")
+            self.assertEqual(app.current_layout_mode, "freewrite")
+            self.assertEqual(app._effective_layout_mode(), "freewrite")
             self.assertEqual(app.focus_target, "editor")
+            db.close()
+
+    async def test_exercise_mode_is_disabled_without_guided_questions(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "exercise.md").write_text(
+                """---
+title: Exercise
+part: 1
+module: M
+type: exercise
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part1/exercise.md", save_current=False)
+            await app.action_set_mode("exercise")
+
+            self.assertEqual(app.current_layout_mode, "side")
+            self.assertEqual(app.bell_count, 1)
+            db.close()
+
+    async def test_exercise_mode_seeds_blank_scaffold(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "exercise.md").write_text(
+                """---
+title: Exercise
+part: 1
+module: M
+type: exercise
+---
+
+Prompt
+
+## Reflection questions
+
+1\\. What kind of cyberpunk world am I drawn to write?
+2\\. What human cost am I most interested in exploring?
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part1/exercise.md", save_current=False)
+            freewrite_entry_id = app.current_entry_id
+            await app.action_set_mode("exercise")
+
+            self.assertEqual(app.current_layout_mode, "exercise")
+            self.assertEqual(app._effective_layout_mode(), "exercise")
+            self.assertNotEqual(app.current_entry_id, freewrite_entry_id)
+            self.assertIn("1. What kind of cyberpunk world am I drawn to write?", app.editor.text)
+            self.assertIn("2. What human cost am I most interested in exploring?", app.editor.text)
+            self.assertIn("Answer:", app.editor.text)
+            db.close()
+
+    async def test_freewrite_and_exercise_modes_persist_separately(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "exercise.md").write_text(
+                """---
+title: Exercise
+part: 1
+module: M
+type: exercise
+---
+
+Prompt
+
+## Reflection questions
+
+1\\. What kind of cyberpunk world am I drawn to write?
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part1/exercise.md", save_current=False)
+            freewrite_entry_id = app.current_entry_id
+            app.editor.text = "freewrite draft"
+            app._set_save_indicator("Unsaved •", "unsaved")
+
+            await app.action_set_mode("exercise")
+            exercise_entry_id = app.current_entry_id
+            exercise_text = f"{app.editor.text}\nA costly, street-level future."
+            app.editor.text = exercise_text
+            app._set_save_indicator("Unsaved •", "unsaved")
+
+            await app.action_set_mode("freewrite")
+
+            self.assertEqual(app.current_entry_id, freewrite_entry_id)
+            self.assertEqual(app.editor.text, "freewrite draft")
+            self.assertNotEqual(exercise_entry_id, freewrite_entry_id)
+            self.assertEqual(db.get_latest_entry("part1/exercise.md", "freewrite").content, "freewrite draft")
+            self.assertEqual(db.get_latest_entry("part1/exercise.md", "exercise").id, exercise_entry_id)
+            self.assertEqual(db.get_latest_entry("part1/exercise.md", "exercise").content, exercise_text)
+            db.close()
+
+    async def test_history_scopes_to_current_draft_kind(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "project.md").write_text(
+                """---
+title: Project
+part: 1
+module: M
+type: long-term
+save_mode: project
+---
+
+Prompt
+
+## Reflection questions
+
+1\\. What kind of future do I want to keep exploring?
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part1/project.md", save_current=False)
+            app.editor.text = "freewrite draft"
+            app._set_save_indicator("Unsaved •", "unsaved")
+            await app._save_current_entry("manual")
+
+            await app.action_set_mode("exercise")
+            app.editor.text = f"{app.editor.text}\nHope under pressure."
+            app._set_save_indicator("Unsaved •", "unsaved")
+            await app._save_current_entry("manual")
+
+            await app.action_set_mode("freewrite")
+            await app.action_show_history()
+            self.assertIsNotNone(app.pushed_screen)
+            self.assertEqual(
+                [entry.draft_kind for entry in app.pushed_screen.entries],
+                ["freewrite"],
+            )
+
+            await app.action_set_mode("exercise")
+            await app.action_show_history()
+            self.assertIsNotNone(app.pushed_screen)
+            self.assertEqual(
+                [entry.draft_kind for entry in app.pushed_screen.entries],
+                ["exercise"],
+            )
+            db.close()
+
+    async def test_restore_preferences_maps_legacy_write_to_freewrite(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "exercise.md").write_text(
+                """---
+title: Exercise
+part: 1
+module: M
+type: exercise
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            db.set_preference("last_mode", "write")
+            app = HarnessApp(database=db, content_root=root)
+
+            app._restore_preferences()
+
+            self.assertEqual(app.current_layout_mode, "freewrite")
             db.close()
 
 
