@@ -371,10 +371,14 @@ class GBTWApp(App[None]):
         *,
         database: Database | None = None,
         content_index: ContentIndex | None = None,
+        autosave_delay_seconds: float = 4.0,
+        sprint_tick_seconds: float = 1.0,
     ) -> None:
         super().__init__()
         self.database: Database | None = database or Database()
         self.content_index = content_index or load_content_index()
+        self.autosave_delay_seconds = autosave_delay_seconds
+        self.sprint_tick_seconds = sprint_tick_seconds
         self.current_exercise: Exercise | None = None
         self.current_entry_id: int | None = None
         self.current_layout_mode = "side"
@@ -388,6 +392,7 @@ class GBTWApp(App[None]):
         self._sprint_timer: Timer | None = None
         self._using_markdown_fallback = False
         self._last_save_message = "Saved ✓"
+        self._save_indicator_state = "saved"
 
     def compose(self) -> ComposeResult:
         with Container(id="workspace"):
@@ -702,7 +707,10 @@ class GBTWApp(App[None]):
             return
         self._autosave_generation += 1
         generation = self._autosave_generation
-        self.set_timer(4.0, lambda: self.call_after_refresh(self._autosave_if_current, generation))
+        self.set_timer(
+            self.autosave_delay_seconds,
+            lambda: self.call_after_refresh(self._autosave_if_current, generation),
+        )
 
     def _autosave_if_current(self, generation: int) -> None:
         if generation != self._autosave_generation:
@@ -748,17 +756,17 @@ class GBTWApp(App[None]):
             self._set_save_indicator("Saved ✓", "saved")
 
     def _set_save_indicator(self, text: str, state: str) -> None:
+        self._last_save_message = text
+        self._save_indicator_state = state
         indicator = self.query_one("#save-indicator", Label)
         indicator.update(text)
         indicator.remove_class("saving")
         indicator.remove_class("saved")
         indicator.remove_class("unsaved")
         indicator.add_class(state)
-        self._last_save_message = text
 
     def _is_dirty(self) -> bool:
-        indicator = self.query_one("#save-indicator", Label)
-        return "unsaved" in indicator.classes
+        return self._save_indicator_state == "unsaved"
 
     def _focus_editor(self) -> None:
         self.query_one("#editor", TextArea).focus()
@@ -774,7 +782,7 @@ class GBTWApp(App[None]):
         self._sprint_seconds_remaining = seconds
         if self._sprint_timer is not None:
             self._sprint_timer.stop()
-        self._sprint_timer = self.set_interval(1.0, self._tick_sprint)
+        self._sprint_timer = self.set_interval(self.sprint_tick_seconds, self._tick_sprint)
         self._focus_editor()
         self._update_word_count()
 
