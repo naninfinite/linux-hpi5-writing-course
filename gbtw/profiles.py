@@ -61,14 +61,8 @@ class ProfileStore:
         )
 
     def create_profile(self, display_name: str) -> ProfileRecord:
-        name = display_name.strip()
-        if not name:
-            raise ProfileValidationError("Enter a profile name.")
-        if len(name) > MAX_PROFILE_NAME_LENGTH:
-            raise ProfileValidationError(f"Profile names must be {MAX_PROFILE_NAME_LENGTH} characters or fewer.")
         profiles = self._load_profiles()
-        if any(record.display_name.casefold() == name.casefold() for record in profiles):
-            raise ProfileValidationError("That profile name already exists.")
+        name = self._validate_display_name(display_name, profiles)
         profile_id = self._unique_profile_id(_slugify(name), {record.profile_id for record in profiles})
         timestamp = datetime.now().astimezone()
         record = ProfileRecord(
@@ -81,6 +75,27 @@ class ProfileStore:
         profiles.append(record)
         self._save_profiles(profiles)
         return record
+
+    def rename_profile(self, profile_id: str, display_name: str) -> ProfileRecord:
+        profiles = self._load_profiles()
+        existing = next((record for record in profiles if record.profile_id == profile_id), None)
+        if existing is None:
+            raise KeyError(f"profile {profile_id} not found")
+        name = self._validate_display_name(
+            display_name,
+            profiles,
+            exclude_profile_id=profile_id,
+        )
+        renamed = ProfileRecord(
+            profile_id=existing.profile_id,
+            display_name=name,
+            db_path=existing.db_path,
+            created_at=existing.created_at,
+            last_used_at=existing.last_used_at,
+        )
+        refreshed = [renamed if record.profile_id == profile_id else record for record in profiles]
+        self._save_profiles(refreshed)
+        return renamed
 
     def mark_used(self, profile_id: str) -> ProfileRecord:
         profiles = self._load_profiles()
@@ -106,6 +121,25 @@ class ProfileStore:
 
     def get_profile(self, profile_id: str) -> ProfileRecord | None:
         return next((record for record in self._load_profiles() if record.profile_id == profile_id), None)
+
+    def _validate_display_name(
+        self,
+        display_name: str,
+        profiles: list[ProfileRecord],
+        *,
+        exclude_profile_id: str | None = None,
+    ) -> str:
+        name = display_name.strip()
+        if not name:
+            raise ProfileValidationError("Enter a profile name.")
+        if len(name) > MAX_PROFILE_NAME_LENGTH:
+            raise ProfileValidationError(f"Profile names must be {MAX_PROFILE_NAME_LENGTH} characters or fewer.")
+        if any(
+            record.profile_id != exclude_profile_id and record.display_name.casefold() == name.casefold()
+            for record in profiles
+        ):
+            raise ProfileValidationError("That profile name already exists.")
+        return name
 
     def _load_profiles(self) -> list[ProfileRecord]:
         data = self._read_registry()
