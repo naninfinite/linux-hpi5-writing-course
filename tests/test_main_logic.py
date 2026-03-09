@@ -10,11 +10,12 @@ from gbtw.content import Exercise, load_content_index
 from gbtw.db import Database
 
 try:
-    from gbtw.main import ExerciseListScreen, GBTWApp, format_project_indicator
+    from gbtw.main import ExerciseListScreen, FooterControl, GBTWApp, format_project_indicator
 
     HAS_TEXTUAL = True
 except ModuleNotFoundError:
     ExerciseListScreen = object  # type: ignore[assignment]
+    FooterControl = object  # type: ignore[assignment]
     GBTWApp = object  # type: ignore[assignment]
     format_project_indicator = lambda exercise: ""  # type: ignore[assignment]
     HAS_TEXTUAL = False
@@ -319,6 +320,7 @@ Body
             app = HarnessApp(database=db, content_root=root)
 
             await app._open_exercise_by_id("part1/a.md", save_current=False)
+            await app.action_set_mode("freewrite")
             app.editor.text = "draft one"
             app._set_save_indicator("Unsaved •", "unsaved")
             await app._save_current_entry("manual")
@@ -371,6 +373,7 @@ Body
             app = HarnessApp(database=db, content_root=root)
 
             await app._open_exercise_by_id("part1/a.md", save_current=False)
+            await app.action_set_mode("freewrite")
             app.editor.text = "draft one"
             app._set_save_indicator("Unsaved •", "unsaved")
             await app._save_current_entry("manual")
@@ -428,6 +431,7 @@ Body B
             app = HarnessApp(database=db, content_root=root)
 
             await app._open_exercise_by_id("part1/a.md", save_current=False)
+            await app.action_set_mode("freewrite")
             app.editor.text = "draft one"
             app._set_save_indicator("Unsaved •", "unsaved")
             await app._save_current_entry("manual")
@@ -885,6 +889,18 @@ Body
             "part4-portfolio · consolidator [seed]",
         )
 
+    def test_footer_control_only_exposes_project_detail_when_enabled(self) -> None:
+        control = FooterControl("Project", control_id="mode-project")
+
+        control.set_detail("dark-fantasy-novel · seed")
+        self.assertEqual(control.tooltip, "dark-fantasy-novel · seed")
+
+        control.set_disabled(True)
+        self.assertIsNone(control.tooltip)
+
+        control.set_disabled(False)
+        self.assertEqual(control.tooltip, "dark-fantasy-novel · seed")
+
     def test_exercise_list_projects_tab_refreshes_documents_and_dismisses_selected_contributor(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "content"
@@ -1232,6 +1248,7 @@ Prompt
             app = HarnessApp(database=db, content_root=root)
 
             await app._open_exercise_by_id("part2/seed.md", save_current=False)
+            await app.action_set_mode("freewrite")
             app.editor.text = "seed freewrite"
             app._set_save_indicator("Unsaved •", "unsaved")
             await app._save_current_entry("manual")
