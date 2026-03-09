@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from tempfile import TemporaryDirectory
@@ -329,9 +330,75 @@ class WritingTextAreaTests(unittest.TestCase):
 
         self.assertEqual(editor.tab_behavior, "indent")
 
+    def test_auto_capitalizes_at_start_of_text(self) -> None:
+        editor = WritingTextArea("")
+
+        should_capitalize = editor._auto_capitalize_character(
+            SimpleNamespace(is_printable=True, character="h")
+        )
+
+        self.assertTrue(should_capitalize)
+
+    def test_auto_capitalizes_after_period(self) -> None:
+        editor = WritingTextArea("hello. ")
+        editor.cursor_location = (0, 7)
+
+        should_capitalize = editor._auto_capitalize_character(
+            SimpleNamespace(is_printable=True, character="n")
+        )
+
+        self.assertTrue(should_capitalize)
+
+    def test_auto_capitalization_skips_mid_sentence(self) -> None:
+        editor = WritingTextArea("hello ")
+        editor.cursor_location = (0, 6)
+
+        should_capitalize = editor._auto_capitalize_character(
+            SimpleNamespace(is_printable=True, character="n")
+        )
+
+        self.assertFalse(should_capitalize)
+
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual is not installed")
 class MainLogicTests(unittest.IsolatedAsyncioTestCase):
+    async def test_first_writing_exercise_locks_current_draft_after_ten_minutes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "a.md").write_text(
+                """---
+title: A
+part: 1
+module: M
+type: long-term
+save_mode: session
+---
+
+Write
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app.on_mount()
+            self.assertIsNotNone(app.current_entry_id)
+            self.assertIsNotNone(app._timed_state)
+            assert app._timed_state is not None
+            self.assertIsNone(app._timed_state.started_at)
+
+            app.editor.text = "h"
+            app.on_editor_changed(None)  # type: ignore[arg-type]
+
+            self.assertIsNotNone(app._timed_state.started_at)
+            app._timed_state.started_at = datetime.now().astimezone() - timedelta(seconds=app._timed_limit_seconds)
+            app._tick_timed_draft()
+
+            self.assertTrue(app._timed_state.locked)
+            self.assertTrue(app.editor.disabled)
+            db.close()
+
     async def test_on_mount_with_injected_database_bypasses_profile_picker(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "content"
