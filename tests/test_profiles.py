@@ -76,6 +76,34 @@ class ProfileStoreTests(unittest.TestCase):
             self.assertGreater(refreshed.last_used_at, second.last_used_at)
             self.assertEqual(profiles[0].profile_id, first.profile_id)
 
+    def test_rename_profile_updates_display_name_only(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = ProfileStore(
+                Path(tmp) / "profiles.json",
+                legacy_db_path=Path(tmp) / "progress.db",
+                profiles_dir=Path(tmp) / "profiles",
+            )
+            created = store.create_profile("Alice")
+
+            renamed = store.rename_profile(created.profile_id, "Family Writer")
+
+            self.assertEqual(renamed.profile_id, created.profile_id)
+            self.assertEqual(renamed.db_path, created.db_path)
+            self.assertEqual(store.get_profile(created.profile_id).display_name, "Family Writer")
+
+    def test_rename_profile_rejects_duplicate_name(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = ProfileStore(
+                Path(tmp) / "profiles.json",
+                legacy_db_path=Path(tmp) / "progress.db",
+                profiles_dir=Path(tmp) / "profiles",
+            )
+            alice = store.create_profile("Alice")
+            store.create_profile("Bob")
+
+            with self.assertRaises(ProfileValidationError):
+                store.rename_profile(alice.profile_id, "Bob")
+
     def test_profile_databases_keep_progress_isolated(self) -> None:
         with TemporaryDirectory() as tmp:
             store = ProfileStore(
