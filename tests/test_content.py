@@ -148,9 +148,11 @@ title: Planning
 part: 2
 module: Novel
 type: exercise
+status: ongoing
 project_key: part2-novel
 project_title: Part 2 Novel
 project_seed: true
+project_role: seed
 ---
 
 Body
@@ -165,6 +167,7 @@ module: Novel
 type: reading
 project_key: part2-novel
 project_title: Part 2 Novel
+project_role: consolidator
 ---
 
 Body
@@ -174,10 +177,15 @@ Body
             index = load_content_index(root)
 
         self.assertEqual(index.warnings, ())
-        self.assertEqual(index.project_seed("part2-novel").exercise_id, "part2/a.md")
+        seed = index.project_seed("part2-novel")
+        assert seed is not None
+        self.assertEqual(seed.exercise_id, "part2/a.md")
+        self.assertEqual(seed.status, "ongoing")
+        self.assertEqual(seed.effective_project_role, "seed")
         self.assertEqual(index.get("part2/b.md").project_title, "Part 2 Novel")
+        self.assertEqual(index.get("part2/b.md").effective_project_role, "consolidator")
 
-    def test_load_content_index_disables_invalid_project_group(self) -> None:
+    def test_load_content_index_keeps_project_group_without_seed(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "part2").mkdir()
@@ -212,11 +220,34 @@ Body
             )
             index = load_content_index(root)
 
-        self.assertEqual(len(index.warnings), 1)
-        self.assertIsNone(index.get("part2/a.md").project_key)
-        self.assertIsNone(index.get("part2/b.md").project_key)
+        self.assertEqual(index.warnings, ())
+        self.assertEqual(index.get("part2/a.md").project_key, "part2-novel")
+        self.assertEqual(index.get("part2/b.md").project_key, "part2-novel")
+        self.assertIsNone(index.project_seed("part2-novel"))
 
-    def test_load_content_index_requires_seed_for_multi_doc_project_group(self) -> None:
+    def test_load_content_index_clears_seed_without_project_key(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "part1").mkdir()
+            (root / "part1" / "a.md").write_text(
+                """---
+title: Seedless Flag
+part: 1
+module: Start
+type: exercise
+project_seed: true
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            index = load_content_index(root)
+
+        self.assertEqual(len(index.warnings), 1)
+        self.assertFalse(index.get("part1/a.md").project_seed)
+
+    def test_load_content_index_clears_multiple_seed_flags_but_keeps_project_membership(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "part4").mkdir()
@@ -228,6 +259,7 @@ module: Portfolio
 type: long-term
 save_mode: project
 project_key: part4-portfolio
+project_seed: true
 ---
 
 Body
@@ -241,6 +273,7 @@ part: 4
 module: Portfolio
 type: reading
 project_key: part4-portfolio
+project_seed: true
 ---
 
 Body
@@ -250,7 +283,89 @@ Body
             index = load_content_index(root)
 
         self.assertEqual(len(index.warnings), 1)
-        self.assertIsNone(index.get("part4/a.md").project_key)
+        self.assertEqual(index.get("part4/a.md").project_key, "part4-portfolio")
+        self.assertFalse(index.get("part4/a.md").project_seed)
+        self.assertFalse(index.get("part4/b.md").project_seed)
+        self.assertIsNone(index.project_seed("part4-portfolio"))
+
+    def test_project_groups_sort_cross_part_contributors_by_part_then_filename(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "part1").mkdir()
+            (root / "part2").mkdir()
+            (root / "part1" / "20-seed.md").write_text(
+                """---
+title: Seed
+part: 1
+module: Novel
+type: reading
+project_key: dark-fantasy-novel
+project_seed: true
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            (root / "part1" / "15-world.md").write_text(
+                """---
+title: World
+part: 1
+module: Novel
+type: exercise
+project_key: dark-fantasy-novel
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            (root / "part2" / "p2-10-end.md").write_text(
+                """---
+title: End
+part: 2
+module: Novel
+type: long-term
+save_mode: project
+status: ongoing
+project_key: dark-fantasy-novel
+project_role: consolidator
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            (root / "part2" / "p2-04-pov.md").write_text(
+                """---
+title: POV
+part: 2
+module: Novel
+type: exercise
+project_key: dark-fantasy-novel
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            index = load_content_index(root)
+
+        groups = {group.project_key: group for group in index.project_groups()}
+        group = groups["dark-fantasy-novel"]
+        self.assertEqual(group.parts, (1, 2))
+        self.assertEqual(group.contributor_count, 4)
+        self.assertEqual(
+            [item.exercise.exercise_id for item in group.contributors],
+            [
+                "part1/15-world.md",
+                "part1/20-seed.md",
+                "part2/p2-04-pov.md",
+                "part2/p2-10-end.md",
+            ],
+        )
+        assert group.seed is not None
+        self.assertEqual(group.seed.exercise_id, "part1/20-seed.md")
 
     def test_load_content_index_normalizes_pseudo_table_intro_blocks(self) -> None:
         with TemporaryDirectory() as tmp:
