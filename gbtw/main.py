@@ -63,7 +63,8 @@ Ctrl+H  history modal (current section or project)
 Ctrl+T  timed writing sprint modal
 Ctrl+U  profile switcher
 
-Tab     switch focus between panes
+Tab     switch focus between panes (Write editor: indent)
+Space Space  insert ". " in Write editor
 ?       keyboard help
 
 Ctrl+Q  quit
@@ -167,6 +168,38 @@ def format_project_contributor_option(exercise: Exercise, current_exercise_id: s
     if exercise.exercise_id == current_exercise_id:
         label.append(" *", style=f"bold {CURRENT_MARKER_COLOR}")
     return label
+
+
+class WritingTextArea(TextArea):
+    """TextArea tuned for prose drafting interactions."""
+
+    def __init__(self, text: str = "", **kwargs) -> None:
+        kwargs.setdefault("tab_behavior", "indent")
+        super().__init__(text, **kwargs)
+
+    async def _on_key(self, event: events.Key) -> None:
+        if not self.read_only and event.key == "space" and self._replace_previous_space_with_period():
+            self._restart_blink()
+            event.stop()
+            event.prevent_default()
+            return
+        await super()._on_key(event)
+
+    def _replace_previous_space_with_period(self) -> bool:
+        start, end = self.selection
+        if start != end:
+            return False
+        row, column = self.cursor_location
+        if column < 2:
+            return False
+        line = self.document.get_line(row)
+        if column > len(line) or line[column - 1] != " ":
+            return False
+        preceding = line[column - 2]
+        if preceding.isspace() or preceding in ".!?":
+            return False
+        self.replace(". ", (row, column - 1), (row, column))
+        return True
 
 
 class NewItemScreen(ModalScreen[str | None]):
@@ -1288,7 +1321,7 @@ class GBTWApp(App[None]):
                     yield Button("New", id="draft-new", classes="draft-button")
                     yield Button("Del", id="draft-delete", classes="draft-button")
                     yield Button("Undo", id="draft-undo", classes="draft-button")
-                yield TextArea("", id="editor")
+                yield WritingTextArea("", id="editor")
             with Container(id="project-pane"):
                 with Horizontal(id="project-nav"):
                     yield Button("<", id="proj-prev", classes="proj-nav-btn")
