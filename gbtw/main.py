@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -170,6 +171,14 @@ def format_project_contributor_option(exercise: Exercise, current_exercise_id: s
     return label
 
 
+@dataclass(slots=True)
+class TimedDraftState:
+    started_at: datetime | None = None
+    active_seconds: int = 0
+    typed_chars: int = 0
+    locked: bool = False
+
+
 class WritingTextArea(TextArea):
     """TextArea tuned for prose drafting interactions."""
 
@@ -182,6 +191,15 @@ class WritingTextArea(TextArea):
             self._restart_blink()
             event.stop()
             event.prevent_default()
+            return
+        if not self.read_only and self._auto_capitalize_character(event):
+            self._restart_blink()
+            event.stop()
+            event.prevent_default()
+            start, end = self.selection
+            character = event.character
+            assert character is not None
+            self.replace(character.upper(), start, end)
             return
         await super()._on_key(event)
 
@@ -200,6 +218,36 @@ class WritingTextArea(TextArea):
             return False
         self.replace(". ", (row, column - 1), (row, column))
         return True
+
+    def _auto_capitalize_character(self, event: events.Key) -> bool:
+        if not event.is_printable or event.character is None:
+            return False
+        character = event.character
+        if len(character) != 1 or not character.isalpha() or not character.islower():
+            return False
+        start, end = self.selection
+        if start != end:
+            return False
+        row, column = self.cursor_location
+        if row == 0 and column == 0:
+            return True
+        line = self.document.get_line(row)
+        if column > len(line):
+            return False
+        scan_row = row
+        scan_column = column
+        while True:
+            if scan_column == 0:
+                if scan_row == 0:
+                    return True
+                scan_row -= 1
+                scan_column = len(self.document.get_line(scan_row))
+                continue
+            scan_column -= 1
+            previous = self.document.get_line(scan_row)[scan_column]
+            if previous.isspace():
+                continue
+            return previous == "."
 
 
 class NewItemScreen(ModalScreen[str | None]):
@@ -895,6 +943,13 @@ class GBTWApp(App[None]):
         padding: 0 1;
     }
 
+    #write-session-stats {
+        height: auto;
+        color: #8fbcd4;
+        padding: 0 1;
+        margin-bottom: 1;
+    }
+
     .draft-button {
         min-width: 0;
         height: auto;
@@ -1304,6 +1359,14 @@ class GBTWApp(App[None]):
         self._project_doc_save_gen: int = 0
         self._loading_project_doc: bool = False
         self.current_profile: ProfileRecord | None = None
+        self._timed_limit_seconds = 10 * 60
+        self._timed_first_exercise_id = self._first_writable_exercise_id()
+        self._timed_state: TimedDraftState | None = None
+        self._timed_entry_id: int | None = None
+        self._timed_last_input_at: datetime | None = None
+        self._timed_last_text_length = 0
+        self._timed_state_dirty = False
+        self._timed_tick_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
         with Container(id="workspace"):
@@ -1321,6 +1384,7 @@ class GBTWApp(App[None]):
                     yield Button("New", id="draft-new", classes="draft-button")
                     yield Button("Del", id="draft-delete", classes="draft-button")
                     yield Button("Undo", id="draft-undo", classes="draft-button")
+                yield Label("", id="write-session-stats")
                 yield WritingTextArea("", id="editor")
             with Container(id="project-pane"):
                 with Horizontal(id="project-nav"):
@@ -1625,12 +1689,16 @@ class GBTWApp(App[None]):
             await self._save_project_doc("quit")
         if self._is_dirty():
             await self._save_current_entry("quit")
+        self._persist_timed_state()
+        self._stop_timed_tick_timer()
         if self.database is not None:
             self.database.close()
             self.database = None
         self.exit()
 
     async def on_unmount(self) -> None:
+        self._persist_timed_state()
+        self._stop_timed_tick_timer()
         if self.database is not None:
             self.database.close()
             self.database = None
@@ -1640,6 +1708,8 @@ class GBTWApp(App[None]):
             await self._save_project_doc("switch")
         if self._is_dirty():
             await self._save_current_entry("switch")
+        self._persist_timed_state()
+        self._stop_timed_tick_timer()
         if self.database is not None:
             self.database.close()
             self.database = None
@@ -1670,6 +1740,7 @@ class GBTWApp(App[None]):
         if self._sprint_timer is not None:
             self._sprint_timer.stop()
             self._sprint_timer = None
+        self._clear_timed_state_runtime(persist=False)
         self._save_indicator_state = "saved"
         self._last_save_message = "Saved ✓"
 
@@ -1683,6 +1754,203 @@ class GBTWApp(App[None]):
                     continue
             titles[group.project_key] = group.legacy_title or group.project_key
         return titles
+
+    def _first_writable_exercise_id(self) -> str | None:
+        for exercise in self.content_index.visible_exercises():
+            if exercise.type != "reading":
+                return exercise.exercise_id
+        return None
+
+    def _timed_pref_key(self, entry_id: int) -> str:
+        return f"timed_draft:{entry_id}"
+
+    def _load_timed_state_for_entry(self, entry_id: int) -> TimedDraftState:
+        if self.database is None:
+            return TimedDraftState()
+        raw = self.database.get_preference(self._timed_pref_key(entry_id))
+        if not raw:
+            return TimedDraftState()
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return TimedDraftState()
+        started_at: datetime | None = None
+        raw_started_at = payload.get("started_at")
+        if isinstance(raw_started_at, str):
+            try:
+                started_at = datetime.fromisoformat(raw_started_at)
+            except ValueError:
+                started_at = None
+            if started_at is not None and started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        try:
+            active_seconds = max(0, int(payload.get("active_seconds", 0)))
+        except (TypeError, ValueError):
+            active_seconds = 0
+        try:
+            typed_chars = max(0, int(payload.get("typed_chars", 0)))
+        except (TypeError, ValueError):
+            typed_chars = 0
+        locked = bool(payload.get("locked", False))
+        return TimedDraftState(
+            started_at=started_at,
+            active_seconds=active_seconds,
+            typed_chars=typed_chars,
+            locked=locked,
+        )
+
+    def _persist_timed_state(self) -> None:
+        if (
+            self.database is None
+            or self._timed_state is None
+            or self._timed_entry_id is None
+            or not self._timed_state_dirty
+        ):
+            return
+        payload = {
+            "started_at": self._timed_state.started_at.isoformat() if self._timed_state.started_at is not None else None,
+            "active_seconds": self._timed_state.active_seconds,
+            "typed_chars": self._timed_state.typed_chars,
+            "locked": self._timed_state.locked,
+        }
+        self.database.set_preference(self._timed_pref_key(self._timed_entry_id), json.dumps(payload, separators=(",", ":")))
+        self._timed_state_dirty = False
+
+    def _stop_timed_tick_timer(self) -> None:
+        if self._timed_tick_timer is not None:
+            self._timed_tick_timer.stop()
+            self._timed_tick_timer = None
+
+    def _clear_timed_state_runtime(self, *, persist: bool = True) -> None:
+        if persist:
+            self._persist_timed_state()
+        self._stop_timed_tick_timer()
+        self._timed_state = None
+        self._timed_entry_id = None
+        self._timed_last_input_at = None
+        self._timed_last_text_length = 0
+        self._timed_state_dirty = False
+        self._update_write_session_stats()
+
+    def _timed_state_applies_to_entry(self, exercise: Exercise, entry_id: int) -> bool:
+        return self._timed_first_exercise_id is not None and exercise.exercise_id == self._timed_first_exercise_id and entry_id > 0
+
+    def _activate_timed_state_for_entry(self, exercise: Exercise, entry_id: int, text: str) -> None:
+        if not self._timed_state_applies_to_entry(exercise, entry_id):
+            self._clear_timed_state_runtime()
+            return
+        self._persist_timed_state()
+        self._stop_timed_tick_timer()
+        self._timed_entry_id = entry_id
+        self._timed_state = self._load_timed_state_for_entry(entry_id)
+        self._timed_last_input_at = None
+        self._timed_last_text_length = len(text)
+        self._refresh_timed_state(datetime.now().astimezone())
+        self._ensure_timed_tick_timer()
+        self._update_write_session_stats()
+
+    def _timed_elapsed_seconds(self, now: datetime) -> int:
+        if self._timed_state is None or self._timed_state.started_at is None:
+            return 0
+        return max(0, int((now - self._timed_state.started_at).total_seconds()))
+
+    def _current_entry_locked_by_timer(self) -> bool:
+        return (
+            self._timed_state is not None
+            and self._timed_entry_id is not None
+            and self._timed_entry_id == self.current_entry_id
+            and self._timed_state.locked
+        )
+
+    def _apply_current_editor_disabled_state(self) -> None:
+        if self.current_exercise is None:
+            return
+        try:
+            editor = self.query_one("#editor", TextArea)
+        except Exception:
+            return
+        editor.disabled = not self._exercise_supports_writing(self.current_exercise) or self._current_entry_locked_by_timer()
+
+    def _ensure_timed_tick_timer(self) -> None:
+        if self._timed_state is None or self._timed_state.started_at is None or self._timed_state.locked:
+            self._stop_timed_tick_timer()
+            return
+        if self._timed_tick_timer is None:
+            self._timed_tick_timer = self.set_interval(1.0, self._tick_timed_draft)
+
+    def _refresh_timed_state(self, now: datetime) -> None:
+        if self._timed_state is None or self._timed_state.started_at is None or self._timed_state.locked:
+            return
+        if self._timed_elapsed_seconds(now) < self._timed_limit_seconds:
+            return
+        self._timed_state.locked = True
+        self._timed_state_dirty = True
+        self._stop_timed_tick_timer()
+        self._apply_current_editor_disabled_state()
+        if not self._is_dirty():
+            self._set_save_indicator("10m limit reached", "saved")
+        self.bell()
+        self._update_write_session_stats()
+
+    def _tick_timed_draft(self) -> None:
+        if self._timed_state is None:
+            self._stop_timed_tick_timer()
+            return
+        now = datetime.now().astimezone()
+        if (
+            not self._timed_state.locked
+            and self._timed_last_input_at is not None
+            and (now - self._timed_last_input_at).total_seconds() <= 1.2
+        ):
+            self._timed_state.active_seconds += 1
+            self._timed_state_dirty = True
+        self._refresh_timed_state(now)
+        self._update_write_session_stats()
+
+    def _handle_timed_editor_change(self, text: str) -> None:
+        if self._timed_state is None or self._timed_state.locked:
+            return
+        now = datetime.now().astimezone()
+        if self._timed_state.started_at is None and any(character.isalpha() for character in text):
+            self._timed_state.started_at = now
+            self._timed_state_dirty = True
+            self._ensure_timed_tick_timer()
+        delta = len(text) - self._timed_last_text_length
+        if delta > 0:
+            self._timed_state.typed_chars += delta
+            self._timed_state_dirty = True
+        self._timed_last_text_length = len(text)
+        if self._timed_state.started_at is not None:
+            self._timed_last_input_at = now
+            self._refresh_timed_state(now)
+        self._update_write_session_stats()
+
+    def _update_write_session_stats(self) -> None:
+        try:
+            label = self.query_one("#write-session-stats", Label)
+        except Exception:
+            return
+        visible = (
+            self._timed_state is not None
+            and self.current_exercise is not None
+            and self._timed_entry_id == self.current_entry_id
+            and self.current_exercise.exercise_id == self._timed_first_exercise_id
+            and self._effective_layout_mode() != "project"
+        )
+        label.display = visible
+        if not visible:
+            label.update("")
+            return
+        now = datetime.now().astimezone()
+        elapsed = min(self._timed_elapsed_seconds(now), self._timed_limit_seconds)
+        elapsed_minutes, elapsed_seconds = divmod(elapsed, 60)
+        limit_minutes, limit_seconds = divmod(self._timed_limit_seconds, 60)
+        active_minutes = self._timed_state.active_seconds / 60.0
+        status = "locked" if self._timed_state.locked else ("running" if self._timed_state.started_at else "ready")
+        label.update(
+            f"10m session {elapsed_minutes:02d}:{elapsed_seconds:02d}/{limit_minutes:02d}:{limit_seconds:02d}"
+            f" · typed {self._timed_state.typed_chars} chars · active {active_minutes:.1f}m · {status}"
+        )
 
     async def on_key(self, event: events.Key) -> None:
         if event.key in {"question_mark", "?"}:
@@ -1798,6 +2066,7 @@ class GBTWApp(App[None]):
             self._ignored_loaded_text = None
             return
         self._mark_dirty()
+        self._handle_timed_editor_change(editor.text)
 
     def _restore_preferences(self) -> None:
         assert self.database is not None
@@ -1827,6 +2096,7 @@ class GBTWApp(App[None]):
         await self._open_exercise_by_id(first.exercise_id, save_current=False)
 
     async def _show_empty_state(self) -> None:
+        self._clear_timed_state_runtime()
         self.current_exercise = None
         self.current_entry_id = None
         self.query_one("#exercise-title", Label).update("No exercises found")
@@ -1864,6 +2134,7 @@ class GBTWApp(App[None]):
         target = self.content_index.get(exercise_id)
         if target is None:
             return
+        self._persist_timed_state()
         if save_current and self._is_dirty():
             await self._save_current_entry("switch")
         self.current_exercise = target
@@ -1974,6 +2245,7 @@ class GBTWApp(App[None]):
             exercise_pane.styles.width = "100%"
             writing_pane.styles.width = "100%"
         self._update_bottom_bar()
+        self._update_write_session_stats()
 
     def _update_bottom_bar(self) -> None:
         mapping = {
@@ -2152,6 +2424,7 @@ class GBTWApp(App[None]):
         self._load_disabled_editor()
 
     def _load_disabled_editor(self) -> None:
+        self._clear_timed_state_runtime()
         self.current_entry_id = None
         editor = self.query_one("#editor", TextArea)
         self._loading_editor = True
@@ -2164,20 +2437,23 @@ class GBTWApp(App[None]):
         self._update_draft_controls()
 
     def _load_entry_into_editor(self, exercise: Exercise, record: EntryRecord) -> None:
+        self._persist_timed_state()
         self.current_entry_id = record.id
         self._remember_active_entry(exercise, record)
         editor = self.query_one("#editor", TextArea)
-        editor.disabled = not self._exercise_supports_writing(exercise)
         loaded_text = self._editor_text_for_record(exercise, record)
         self._loading_editor = True
         self._ignored_loaded_text = loaded_text
         editor.load_text(loaded_text)
         self._loading_editor = False
+        self._activate_timed_state_for_entry(exercise, record.id, loaded_text)
+        self._apply_current_editor_disabled_state()
         self._set_save_indicator("Saved ✓", "saved")
         self._update_word_count()
         self._update_draft_controls()
 
     def _load_project_entry_into_editor(self, record: ProjectEntryRecord) -> None:
+        self._clear_timed_state_runtime()
         self.current_entry_id = record.id
         editor = self.query_one("#editor", TextArea)
         editor.disabled = False
@@ -2413,6 +2689,9 @@ class GBTWApp(App[None]):
             if self.current_exercise is not None:
                 self._remember_active_entry(self.current_exercise, record)
         self._set_save_indicator("Saved ✓", "saved")
+        self._persist_timed_state()
+        if self._current_entry_locked_by_timer():
+            self._set_save_indicator("10m limit reached", "saved")
         self._update_draft_controls()
         if reason == "manual":
             self.set_timer(1.5, lambda: self.call_after_refresh(self._restore_saved_indicator))
@@ -2530,6 +2809,7 @@ class GBTWApp(App[None]):
         visible = self.current_exercise is not None and self._can_manage_freewrite_drafts()
         toolbar.display = visible
         if not visible:
+            self._update_write_session_stats()
             return
         entries = self._current_freewrite_entries()
         count = len(entries)
@@ -2540,8 +2820,12 @@ class GBTWApp(App[None]):
         new_button.disabled = False
         delete_button.disabled = count == 0
         undo_button.disabled = not self._can_undo_deleted_freewrite()
+        self._update_write_session_stats()
 
     def _restore_saved_indicator(self) -> None:
+        if self._current_entry_locked_by_timer():
+            self._set_save_indicator("10m limit reached", "saved")
+            return
         if not self._is_dirty():
             self._set_save_indicator("Saved ✓", "saved")
 
