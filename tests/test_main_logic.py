@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 import unittest
 
-from gbtw.content import load_content_index
+from gbtw.content import Exercise, load_content_index
 from gbtw.db import Database
 
 try:
-    from gbtw.main import GBTWApp
+    from gbtw.main import ExerciseListScreen, GBTWApp, format_project_indicator
 
     HAS_TEXTUAL = True
 except ModuleNotFoundError:
+    ExerciseListScreen = object  # type: ignore[assignment]
     GBTWApp = object  # type: ignore[assignment]
+    format_project_indicator = lambda exercise: ""  # type: ignore[assignment]
     HAS_TEXTUAL = False
 
 
@@ -125,6 +128,59 @@ class HarnessApp(GBTWApp):
         tasks = list(self.pending_tasks)
         self.pending_tasks.clear()
         await asyncio.gather(*tasks)
+
+
+class FakeOptionList:
+    def __init__(self) -> None:
+        self.options = []
+        self.highlighted = 0
+        self.focused = False
+
+    def clear_options(self) -> None:
+        self.options = []
+
+    def add_options(self, options) -> None:
+        self.options.extend(options)
+
+    @property
+    def option_count(self) -> int:
+        return len(self.options)
+
+    def focus(self) -> None:
+        self.focused = True
+
+
+class FakeTextWidget:
+    def __init__(self) -> None:
+        self.value = ""
+
+    def update(self, value) -> None:
+        self.value = value
+
+
+class FakeTabbedContent:
+    def __init__(self, active: str) -> None:
+        self.active = active
+
+
+class HarnessExerciseListScreen(ExerciseListScreen):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.dismissed = None
+        self._fake_widgets = {
+            "#exercise-list-hint": FakeTextWidget(),
+            "#exercise-list": FakeOptionList(),
+            "#project-list": FakeOptionList(),
+            "#project-document-list": FakeOptionList(),
+            "#project-documents-title": FakeTextWidget(),
+            "#exercise-list-tabs": FakeTabbedContent(self.TAB_EXERCISES),
+        }
+
+    def query_one(self, selector: str, expected_type=None):  # type: ignore[override]
+        return self._fake_widgets[selector]
+
+    def dismiss(self, result=None) -> None:  # type: ignore[override]
+        self.dismissed = result
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual is not installed")
@@ -775,6 +831,115 @@ Body
             self.assertEqual(app.focus_target, "editor")
             db.close()
 
+    async def test_action_show_exercise_list_passes_database_project_titles(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part2").mkdir(parents=True)
+            (root / "part2" / "reading.md").write_text(
+                """---
+title: Reading
+part: 2
+module: Novel
+type: reading
+project_key: part2-novel
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+            db.connection.execute(
+                "UPDATE projects SET title = ? WHERE project_key = ?",
+                ("Dark Fantasy Novel", "part2-novel"),
+            )
+            db.connection.commit()
+
+            await app.action_show_exercise_list()
+
+            self.assertIsInstance(app.pushed_screen, ExerciseListScreen)
+            self.assertEqual(app.pushed_screen.project_titles["part2-novel"], "Dark Fantasy Novel")
+            db.close()
+
+    def test_format_project_indicator_handles_seed_and_consolidator(self) -> None:
+        exercise = Exercise(
+            exercise_id="part4/p4-09-final-portfolio.md",
+            source_path=Path("/tmp/part4/p4-09-final-portfolio.md"),
+            title="Portfolio",
+            part=4,
+            module="Final Portfolio",
+            type="long-term",
+            status="ongoing",
+            save_mode="project",
+            body="Body",
+            guided_questions=(),
+            project_key="part4-portfolio",
+            project_title=None,
+            project_seed=True,
+            project_role="consolidator",
+        )
+
+        self.assertEqual(
+            format_project_indicator(exercise),
+            "part4-portfolio · consolidator [seed]",
+        )
+
+    def test_exercise_list_projects_tab_refreshes_documents_and_dismisses_selected_contributor(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part2").mkdir(parents=True)
+            (root / "part1" / "20-seed.md").write_text(
+                """---
+title: Seed
+part: 1
+module: Novel
+type: reading
+project_key: dark-fantasy-novel
+project_seed: true
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            (root / "part2" / "p2-10-end.md").write_text(
+                """---
+title: End
+part: 2
+module: Novel
+type: long-term
+save_mode: project
+status: ongoing
+project_key: dark-fantasy-novel
+project_role: consolidator
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            screen = HarnessExerciseListScreen(
+                load_content_index(root),
+                "part2/p2-10-end.md",
+                {"dark-fantasy-novel": "dark-fantasy-novel"},
+            )
+
+            screen._refresh_project_options()
+            screen.query_one("#exercise-list-tabs").active = screen.TAB_PROJECTS
+            project_list = screen.query_one("#project-list")
+            document_list = screen.query_one("#project-document-list")
+
+            self.assertEqual(project_list.option_count, 1)
+            self.assertEqual(document_list.option_count, 2)
+
+            screen.on_project_selected(SimpleNamespace(option_id="project:dark-fantasy-novel"))
+            self.assertTrue(document_list.focused)
+
+            screen.on_project_document_selected(SimpleNamespace(option_id="exercise:part1/20-seed.md"))
+            self.assertEqual(screen.dismissed, "part1/20-seed.md")
+
     async def test_exercise_mode_seeds_blank_scaffold(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "content"
@@ -1025,7 +1190,7 @@ Prompt
             await app._save_current_entry("manual")
             await app.action_show_history()
 
-            self.assertEqual(app.pushed_screen.title, "Part 4 Portfolio")
+            self.assertEqual(app.pushed_screen.title, "part4-portfolio")
             self.assertEqual(app.pushed_screen.entries[0].project_key, "part4-portfolio")
             db.close()
 
