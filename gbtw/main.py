@@ -533,10 +533,19 @@ class FooterControl(Static):
     def __init__(self, label: str, *, control_id: str) -> None:
         super().__init__(label, id=control_id, classes="footer-control")
         self._is_disabled = False
+        self._detail = ""
 
     def set_disabled(self, disabled: bool) -> None:
         self._is_disabled = disabled
         self.set_class(disabled, "disabled")
+        self._sync_tooltip()
+
+    def set_detail(self, detail: str) -> None:
+        self._detail = detail
+        self._sync_tooltip()
+
+    def _sync_tooltip(self) -> None:
+        self.tooltip = None if self._is_disabled or not self._detail else self._detail
 
     def action_activate(self) -> None:
         if self._is_disabled:
@@ -839,11 +848,6 @@ class GBTWApp(App[None]):
         margin-bottom: 1;
     }
 
-    #project-indicator {
-        color: #91a3ad;
-        margin-left: 1;
-    }
-
     .field-label {
         margin-top: 1;
     }
@@ -934,7 +938,6 @@ class GBTWApp(App[None]):
                 yield FooterControl("?", control_id="help-button")
             with Horizontal(id="status-strip"):
                 yield Label("Word count: 0", id="word-count")
-                yield Label("", id="project-indicator")
                 yield Label("Saved ✓", id="save-indicator", classes="saved")
 
     async def on_mount(self) -> None:
@@ -1178,7 +1181,6 @@ class GBTWApp(App[None]):
         self.current_entry_id = None
         self.query_one("#exercise-title", Label).update("No exercises found")
         self.query_one("#exercise-meta", Label).update("Run install.sh to create sample content.")
-        self._update_project_indicator(None)
         await self._update_exercise_markdown("# No exercises found\n\nRun install.sh to create sample content.")
         self._load_disabled_editor()
 
@@ -1226,15 +1228,6 @@ class GBTWApp(App[None]):
         else:
             self._focus_editor()
 
-    def _update_project_indicator(self, exercise: Exercise | None) -> None:
-        try:
-            indicator = self.query_one("#project-indicator", Label)
-        except Exception:
-            return
-        indicator_text = format_project_indicator(exercise)
-        indicator.update(indicator_text)
-        indicator.display = bool(indicator_text)
-
     def _update_exercise_header(self, exercise: Exercise) -> None:
         try:
             title = self.query_one("#exercise-title", Label)
@@ -1257,7 +1250,6 @@ class GBTWApp(App[None]):
             meta_text.append("  ")
             meta_text.append(f"[{exercise.status}]", style=status_style)
         meta.update(meta_text)
-        self._update_project_indicator(exercise)
 
     async def _update_exercise_markdown(self, markdown_text: str) -> None:
         viewer = self.query_one("#exercise-markdown", MarkdownViewer)
@@ -1339,6 +1331,7 @@ class GBTWApp(App[None]):
                 control.set_disabled(not can_use_exercise_mode)
             elif mode == "project":
                 control.set_disabled(not can_use_project_mode)
+                control.set_detail(format_project_indicator(self.current_exercise))
             elif mode in WRITING_LAYOUTS:
                 control.set_disabled(not can_write)
         self._update_word_count()
@@ -1365,7 +1358,7 @@ class GBTWApp(App[None]):
         if mode == "project":
             return self._project_mode_available(target)
         if mode in WRITING_LAYOUTS:
-            return self._exercise_supports_writing(target)
+            return target is None or self._exercise_supports_writing(target)
         return mode in LAYOUTS
 
     def _effective_layout_mode(self, exercise: Exercise | None = None) -> str:
