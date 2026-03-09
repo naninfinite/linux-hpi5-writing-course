@@ -8,15 +8,23 @@ import unittest
 
 from gbtw.content import Exercise, load_content_index
 from gbtw.db import Database
+from gbtw.profiles import ProfileStore
 
 try:
-    from gbtw.main import ExerciseListScreen, FooterControl, GBTWApp, format_project_indicator
+    from gbtw.main import (
+        ExerciseListScreen,
+        FooterControl,
+        GBTWApp,
+        format_footer_control_label,
+        format_project_indicator,
+    )
 
     HAS_TEXTUAL = True
 except ModuleNotFoundError:
     ExerciseListScreen = object  # type: ignore[assignment]
     FooterControl = object  # type: ignore[assignment]
     GBTWApp = object  # type: ignore[assignment]
+    format_footer_control_label = lambda *args, **kwargs: None  # type: ignore[assignment]
     format_project_indicator = lambda exercise: ""  # type: ignore[assignment]
     HAS_TEXTUAL = False
 
@@ -72,10 +80,38 @@ class FakeProjectTree:
         self.focused = True
 
 
+class FakeFooterControl:
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.active = False
+        self.disabled = False
+        self.detail = ""
+        self.indicator = False
+
+    def set_active(self, active: bool) -> None:
+        self.active = active
+
+    def set_disabled(self, disabled: bool) -> None:
+        self.disabled = disabled
+
+    def set_detail(self, detail: str) -> None:
+        self.detail = detail
+
+    def set_indicator(self, show_indicator: bool) -> None:
+        self.indicator = show_indicator
+
+
 class HarnessApp(GBTWApp):
-    def __init__(self, *, database: Database, content_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        database: Database | None = None,
+        profile_store: ProfileStore | None = None,
+        content_root: Path,
+    ) -> None:
         super().__init__(
             database=database,
+            profile_store=profile_store,
             content_index=load_content_index(content_root),
             autosave_delay_seconds=0.01,
             sprint_tick_seconds=0.01,
@@ -87,6 +123,14 @@ class HarnessApp(GBTWApp):
         self.proj_prev_btn = FakeButton()
         self.proj_next_btn = FakeButton()
         self.project_tree = FakeProjectTree()
+        self.footer_controls = {
+            "#mode-read": FakeFooterControl("Read"),
+            "#mode-side": FakeFooterControl("Side"),
+            "#mode-stack": FakeFooterControl("Stack"),
+            "#mode-freewrite": FakeFooterControl("Write"),
+            "#mode-exercise": FakeFooterControl("Exercise"),
+            "#mode-project": FakeFooterControl("Project"),
+        }
         self.focus_target: str | None = None
         self.markdown_text = ""
         self.bottom_bar_updates = 0
@@ -94,6 +138,8 @@ class HarnessApp(GBTWApp):
         self.bell_count = 0
         self.pending_tasks: list[asyncio.Task[object]] = []
         self.pushed_screen = None
+        self.screen_results: list[object] = []
+        self.push_screen_wait_calls = 0
         self.draft_toolbar_visible = False
         self.draft_label = ""
         self.draft_previous_disabled = True
@@ -116,6 +162,8 @@ class HarnessApp(GBTWApp):
             return self.proj_next_btn
         if selector == "#project-tree":
             return self.project_tree
+        if selector in self.footer_controls:
+            return self.footer_controls[selector]
         raise AssertionError(f"unexpected selector {selector}")
 
     async def _update_exercise_markdown(self, markdown_text: str) -> None:
@@ -161,6 +209,9 @@ class HarnessApp(GBTWApp):
     def _apply_layout(self) -> None:
         self.bottom_bar_updates += 1
 
+    def sync_footer_controls(self) -> None:
+        GBTWApp._update_bottom_bar(self)
+
     def set_timer(self, *args, **kwargs):  # type: ignore[override]
         return None
 
@@ -178,6 +229,14 @@ class HarnessApp(GBTWApp):
     def push_screen(self, screen, callback=None, *args, **kwargs):  # type: ignore[override]
         self.pushed_screen = screen
         return None
+
+    async def push_screen_wait(self, screen, *args, **kwargs):  # type: ignore[override]
+        self.pushed_screen = screen
+        self.push_screen_wait_calls += 1
+        if not self.screen_results:
+            raise AssertionError("missing queued screen result")
+        result = self.screen_results.pop(0)
+        return result() if callable(result) else result
 
     async def wait_for_workers(self) -> None:
         if not self.pending_tasks:
@@ -242,6 +301,112 @@ class HarnessExerciseListScreen(ExerciseListScreen):
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual is not installed")
 class MainLogicTests(unittest.IsolatedAsyncioTestCase):
+    async def test_on_mount_with_injected_database_bypasses_profile_picker(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "a.md").write_text(
+                """---
+title: A
+part: 1
+module: M
+type: exercise
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            store = ProfileStore(
+                Path(tmp) / "profiles.json",
+                legacy_db_path=Path(tmp) / "legacy.db",
+                profiles_dir=Path(tmp) / "profiles",
+            )
+            app = HarnessApp(database=db, profile_store=store, content_root=root)
+
+            await app.on_mount()
+
+            self.assertEqual(app.push_screen_wait_calls, 0)
+            self.assertIsNone(app.current_profile)
+            self.assertIsNotNone(app.current_exercise)
+            db.close()
+
+    async def test_on_mount_without_database_requires_profile_selection(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "a.md").write_text(
+                """---
+title: A
+part: 1
+module: M
+type: exercise
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            store = ProfileStore(
+                Path(tmp) / "profiles.json",
+                legacy_db_path=Path(tmp) / "legacy.db",
+                profiles_dir=Path(tmp) / "profiles",
+            )
+            default_profile = store.list_profiles()[0]
+            app = HarnessApp(profile_store=store, content_root=root)
+            app.screen_results = [default_profile]
+
+            await app.on_mount()
+            await app.wait_for_workers()
+
+            self.assertEqual(app.push_screen_wait_calls, 1)
+            self.assertIsNotNone(app.current_profile)
+            assert app.current_profile is not None
+            self.assertEqual(app.current_profile.profile_id, "default")
+            self.assertIsNotNone(app.database)
+            self.assertIsNotNone(app.current_exercise)
+            app.database.close()
+
+    async def test_on_mount_can_create_profile_before_opening_it(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "a.md").write_text(
+                """---
+title: A
+part: 1
+module: M
+type: exercise
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            store = ProfileStore(
+                Path(tmp) / "profiles.json",
+                legacy_db_path=Path(tmp) / "legacy.db",
+                profiles_dir=Path(tmp) / "profiles",
+            )
+            app = HarnessApp(profile_store=store, content_root=root)
+            app.screen_results = [
+                "__new__",
+                "Alice",
+                lambda: store.get_profile("alice"),
+            ]
+
+            await app.on_mount()
+            await app.wait_for_workers()
+
+            self.assertEqual(app.push_screen_wait_calls, 3)
+            self.assertIsNotNone(app.current_profile)
+            assert app.current_profile is not None
+            self.assertEqual(app.current_profile.profile_id, "alice")
+            self.assertEqual(store.list_profiles()[0].profile_id, "alice")
+            assert app.database is not None
+            app.database.close()
+
     async def test_startup_restore_stays_clean_until_user_types(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "content"
@@ -945,6 +1110,16 @@ Body
             "part4-portfolio · consolidator [seed]",
         )
 
+    def test_format_footer_control_label_adds_project_dot(self) -> None:
+        self.assertEqual(
+            format_footer_control_label("Project", show_indicator=False).plain,
+            "Project",
+        )
+        self.assertEqual(
+            format_footer_control_label("Project", show_indicator=True).plain,
+            "Project •",
+        )
+
     def test_footer_control_only_exposes_project_detail_when_enabled(self) -> None:
         control = FooterControl("Project", control_id="mode-project")
 
@@ -956,6 +1131,112 @@ Body
 
         control.set_disabled(False)
         self.assertEqual(control.tooltip, "dark-fantasy-novel · seed")
+
+    async def test_project_button_indicator_is_absent_without_project_key(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "exercise.md").write_text(
+                """---
+title: Exercise
+part: 1
+module: M
+type: exercise
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part1/exercise.md", save_current=False)
+            app.sync_footer_controls()
+
+            self.assertFalse(app.footer_controls["#mode-project"].indicator)
+            db.close()
+
+    async def test_project_button_indicator_appears_on_linked_reading(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part2").mkdir(parents=True)
+            (root / "part2" / "reading.md").write_text(
+                """---
+title: Reading
+part: 2
+module: Novel
+type: reading
+project_key: part2-novel
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part2/reading.md", save_current=False)
+            app.sync_footer_controls()
+
+            self.assertTrue(app.footer_controls["#mode-project"].indicator)
+            db.close()
+
+    async def test_project_button_indicator_appears_on_project_save_mode_lesson(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part2").mkdir(parents=True)
+            (root / "part2" / "project.md").write_text(
+                """---
+title: Project Draft
+part: 2
+module: Novel
+type: long-term
+save_mode: project
+project_key: part2-novel
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part2/project.md", save_current=False)
+            app.sync_footer_controls()
+
+            self.assertTrue(app.footer_controls["#mode-project"].indicator)
+            db.close()
+
+    async def test_project_button_indicator_remains_visible_in_project_mode(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part2").mkdir(parents=True)
+            (root / "part2" / "linked.md").write_text(
+                """---
+title: Linked
+part: 2
+module: Novel
+type: exercise
+project_key: part2-novel
+---
+
+Prompt
+""",
+                encoding="utf-8",
+            )
+            db = Database(Path(tmp) / "progress.db")
+            app = HarnessApp(database=db, content_root=root)
+
+            await app._open_exercise_by_id("part2/linked.md", save_current=False)
+            await app.action_set_mode("project")
+            app.sync_footer_controls()
+
+            self.assertTrue(app.footer_controls["#mode-project"].indicator)
+            self.assertTrue(app.footer_controls["#mode-project"].active)
+            db.close()
 
     def test_exercise_list_projects_tab_refreshes_documents_and_dismisses_selected_contributor(self) -> None:
         with TemporaryDirectory() as tmp:
