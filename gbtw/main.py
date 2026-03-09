@@ -28,9 +28,10 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from .content import ContentIndex, Exercise, ProjectGroup, load_content_index
-from .db import Database, EntryRecord, ProjectEntryRecord
+from .db import Database, EntryRecord, ProjectDocRecord, ProjectEntryRecord
 
 SIDE_RATIOS: tuple[tuple[int, int], ...] = ((40, 60), (50, 50), (60, 40))
+BUILTIN_CATEGORIES: tuple[str, ...] = ("Characters", "Locations", "Worldbuilding", "Plot Notes", "Notes")
 LAYOUTS = {"read", "side", "stack", "freewrite", "exercise", "project"}
 WRITING_LAYOUTS = {"side", "stack", "freewrite", "exercise", "project"}
 SHORTCUT_TEXT = """\
@@ -139,6 +140,29 @@ def format_project_contributor_option(exercise: Exercise, current_exercise_id: s
     if exercise.exercise_id == current_exercise_id:
         label.append(" *", style=f"bold {CURRENT_MARKER_COLOR}")
     return label
+
+
+class NewItemScreen(ModalScreen[str | None]):
+    def __init__(self, prompt: str) -> None:
+        super().__init__()
+        self._prompt_text = prompt
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal"):
+            yield Static(self._prompt_text, classes="modal-title")
+            yield Input(placeholder="Enter name…", id="new-item-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#new-item-input", Input).focus()
+
+    @on(Input.Submitted, "#new-item-input")
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        value = event.value.strip()
+        self.dismiss(value if value else None)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            self.dismiss(None)
 
 
 class HelpScreen(ModalScreen[None]):
@@ -851,6 +875,99 @@ class GBTWApp(App[None]):
     .field-label {
         margin-top: 1;
     }
+
+    #project-pane {
+        width: 100%;
+        height: 100%;
+        layout: vertical;
+        background: #101316;
+    }
+
+    #project-nav {
+        height: auto;
+        padding: 0 1;
+        background: #1a2024;
+        border-bottom: solid #2f353b;
+        align-vertical: middle;
+    }
+
+    #project-name-label {
+        width: 1fr;
+        content-align: center middle;
+        color: #e7dfcf;
+        text-style: bold;
+        padding: 0 1;
+    }
+
+    .proj-nav-btn {
+        min-width: 3;
+        height: auto;
+        padding: 0 1;
+        background: transparent;
+        border: none;
+        color: #aeb6bb;
+    }
+
+    .proj-nav-btn:hover {
+        background: #212b32;
+    }
+
+    #project-body {
+        height: 1fr;
+    }
+
+    #project-tree-pane {
+        width: 26;
+        height: 1fr;
+        border-right: solid #2f353b;
+        background: #131a1f;
+    }
+
+    #project-editor-pane {
+        width: 1fr;
+        height: 1fr;
+        layout: vertical;
+        background: #0f1519;
+        padding: 1 1;
+    }
+
+    #project-doc-title {
+        height: auto;
+        margin-bottom: 1;
+        background: transparent;
+        border: none;
+        border-bottom: solid #31393f;
+        color: #e7dfcf;
+        padding: 0 0;
+    }
+
+    #project-doc-title:focus {
+        border: none;
+        border-bottom: solid #6c7d89;
+        background: transparent;
+    }
+
+    #project-doc-editor {
+        height: 1fr;
+        background: #0f1519;
+    }
+
+    #project-tree {
+        height: 1fr;
+        background: #131a1f;
+        border: none;
+        padding: 0;
+    }
+
+    #project-tree:focus {
+        background: #131a1f;
+        background-tint: #d9d5cf 1%;
+    }
+
+    #project-empty-hint {
+        color: #6c7d89;
+        padding: 1;
+    }
     """
 
     BINDINGS = [
@@ -905,6 +1022,13 @@ class GBTWApp(App[None]):
         self._last_save_message = "Saved ✓"
         self._save_indicator_state = "saved"
         self._last_deleted_freewrite: EntryRecord | None = None
+        self.active_project_key: str | None = None
+        self.current_project_doc_id: int | None = None
+        self._project_tree_expanded: dict[str, bool] = {}
+        self._project_doc_dirty: bool = False
+        self._project_doc_autosave_gen: int = 0
+        self._project_doc_save_gen: int = 0
+        self._loading_project_doc: bool = False
 
     def compose(self) -> ComposeResult:
         with Container(id="workspace"):
@@ -923,6 +1047,17 @@ class GBTWApp(App[None]):
                     yield Button("Del", id="draft-delete", classes="draft-button")
                     yield Button("Undo", id="draft-undo", classes="draft-button")
                 yield TextArea("", id="editor")
+            with Container(id="project-pane"):
+                with Horizontal(id="project-nav"):
+                    yield Button("<", id="proj-prev", classes="proj-nav-btn")
+                    yield Label("", id="project-name-label")
+                    yield Button(">", id="proj-next", classes="proj-nav-btn")
+                with Horizontal(id="project-body"):
+                    with Vertical(id="project-tree-pane"):
+                        yield OptionList(id="project-tree")
+                    with Vertical(id="project-editor-pane"):
+                        yield Input(placeholder="Document title", id="project-doc-title")
+                        yield TextArea("", id="project-doc-editor")
         with Horizontal(id="bottom-bar"):
             with Horizontal(id="left-buttons", classes="button-row"):
                 yield FooterControl("Read", control_id="mode-read")
@@ -957,7 +1092,10 @@ class GBTWApp(App[None]):
             self.bell()
             return
         previous_slot = self._current_editor_slot()
+        previous_effective = self._effective_layout_mode()
         assert self.database is not None
+        if previous_effective == "project" and self._project_doc_dirty:
+            await self._save_project_doc("switch")
         self.current_layout_mode = mode
         self.database.set_preference("last_mode", self.current_layout_mode)
         if self.current_exercise is not None and previous_slot != self._current_editor_slot():
@@ -965,7 +1103,9 @@ class GBTWApp(App[None]):
                 await self._save_current_entry("switch")
             self._load_editor_for_exercise(self.current_exercise)
         self._apply_layout()
-        if self._effective_layout_mode() == "read":
+        if self._effective_layout_mode() == "project":
+            self.query_one("#project-tree", OptionList).focus()
+        elif self._effective_layout_mode() == "read":
             self._focus_exercise()
         else:
             self._focus_editor()
@@ -989,7 +1129,10 @@ class GBTWApp(App[None]):
         await self._step_exercise(-1)
 
     async def action_save(self) -> None:
-        await self._save_current_entry("manual")
+        if self._effective_layout_mode() == "project":
+            await self._save_project_doc("manual")
+        else:
+            await self._save_current_entry("manual")
 
     async def action_previous_draft(self) -> None:
         await self._cycle_freewrite_draft(-1)
@@ -1059,10 +1202,19 @@ class GBTWApp(App[None]):
         self.push_screen(SprintScreen(), callback=self._on_sprint_closed)
 
     async def action_toggle_focus(self) -> None:
+        if self._effective_layout_mode() == "project":
+            focused = self.focused
+            tree = self.query_one("#project-tree", OptionList)
+            editor = self.query_one("#project-doc-editor", TextArea)
+            if focused is tree:
+                editor.focus()
+            else:
+                tree.focus()
+            return
         if not self._can_edit_current_target():
             self._focus_exercise()
             return
-        if self._effective_layout_mode() in {"freewrite", "exercise", "project"}:
+        if self._effective_layout_mode() in {"freewrite", "exercise"}:
             self._focus_editor()
             return
         focused = self.focused
@@ -1073,6 +1225,8 @@ class GBTWApp(App[None]):
             self._focus_editor()
 
     async def action_quit_app(self) -> None:
+        if self._effective_layout_mode() == "project" and self._project_doc_dirty:
+            await self._save_project_doc("quit")
         if self._is_dirty():
             await self._save_current_entry("quit")
         if self.database is not None:
@@ -1114,6 +1268,10 @@ class GBTWApp(App[None]):
             await self.action_delete_draft()
         elif button_id == "draft-undo":
             await self.action_undo_delete_draft()
+        elif button_id == "proj-prev":
+            self._cycle_active_project(-1)
+        elif button_id == "proj-next":
+            self._cycle_active_project(1)
 
     @on(FooterControl.Pressed)
     async def on_footer_control_pressed(self, event: FooterControl.Pressed) -> None:
@@ -1138,6 +1296,62 @@ class GBTWApp(App[None]):
             await self.action_next_exercise()
         elif control_id == "help-button":
             self.push_screen(HelpScreen())
+
+    @on(OptionList.OptionSelected, "#project-tree")
+    async def on_project_tree_selected(self, event: OptionList.OptionSelected) -> None:
+        option_id = event.option_id
+        if not option_id:
+            return
+        if option_id.startswith("cat:"):
+            category = option_id[4:]
+            self._project_tree_expanded[category] = not self._project_tree_expanded.get(category, True)
+            self._rebuild_project_tree()
+        elif option_id.startswith("doc:"):
+            doc_id = int(option_id[4:])
+            if doc_id != self.current_project_doc_id:
+                if self._project_doc_dirty:
+                    await self._save_project_doc("switch")
+                self._load_project_doc(doc_id)
+        elif option_id.startswith("add:"):
+            category = option_id[4:]
+            await self._add_project_doc(category)
+        elif option_id == "newcat":
+            await self._add_project_category()
+
+    async def _add_project_doc(self, category: str) -> None:
+        title = await self.push_screen_wait(NewItemScreen(f"New document in {category}"))
+        if not title or self.database is None or self.active_project_key is None:
+            return
+        doc = self.database.create_project_doc(self.active_project_key, category, title)
+        self._project_tree_expanded[category] = True
+        self._load_project_doc(doc.id)
+        self.query_one("#project-doc-editor", TextArea).focus()
+
+    async def _add_project_category(self) -> None:
+        category = await self.push_screen_wait(NewItemScreen("New category name"))
+        if not category or self.database is None or self.active_project_key is None:
+            return
+        doc = self.database.create_project_doc(self.active_project_key, category, "Untitled")
+        self._project_tree_expanded[category] = True
+        self._load_project_doc(doc.id)
+        self.query_one("#project-doc-title", Input).focus()
+
+    @on(TextArea.Changed, "#project-doc-editor")
+    def on_project_doc_editor_changed(self, _: TextArea.Changed) -> None:
+        if self._loading_project_doc or self.current_project_doc_id is None:
+            return
+        self._mark_project_doc_dirty()
+
+    @on(Input.Submitted, "#project-doc-title")
+    def on_project_doc_title_submitted(self, event: Input.Submitted) -> None:
+        if self.current_project_doc_id is None or self.database is None:
+            return
+        new_title = event.value.strip()
+        if not new_title:
+            return
+        self.database.update_project_doc_title(self.current_project_doc_id, new_title)
+        self._rebuild_project_tree()
+        self.query_one("#project-doc-editor", TextArea).focus()
 
     @on(TextArea.Changed, "#editor")
     def on_editor_changed(self, _: TextArea.Changed) -> None:
@@ -1219,6 +1433,8 @@ class GBTWApp(App[None]):
         self.current_exercise = target
         assert self.database is not None
         self.database.set_preference("last_exercise_id", target.exercise_id)
+        if target.project_key is not None:
+            self._unlock_project_mode()
         self._update_exercise_header(target)
         await self._update_exercise_markdown(target.body)
         self._load_editor_for_exercise(target)
@@ -1279,24 +1495,35 @@ class GBTWApp(App[None]):
         workspace = self.query_one("#workspace", Container)
         exercise_pane = self.query_one("#exercise-pane", Container)
         writing_pane = self.query_one("#writing-pane", Container)
+        project_pane = self.query_one("#project-pane", Container)
         ratio_left, ratio_right = SIDE_RATIOS[self.side_ratio_index]
         layout_mode = self._effective_layout_mode()
-        if layout_mode == "read":
+        if layout_mode == "project":
+            workspace.styles.layout = "vertical"
+            exercise_pane.display = False
+            writing_pane.display = False
+            project_pane.display = True
+            project_pane.styles.width = "100%"
+            project_pane.styles.height = "100%"
+        elif layout_mode == "read":
             workspace.styles.layout = "vertical"
             exercise_pane.display = True
             writing_pane.display = False
+            project_pane.display = False
             exercise_pane.styles.width = "100%"
             exercise_pane.styles.height = "100%"
-        elif layout_mode in {"freewrite", "exercise", "project"}:
+        elif layout_mode in {"freewrite", "exercise"}:
             workspace.styles.layout = "vertical"
             exercise_pane.display = False
             writing_pane.display = True
+            project_pane.display = False
             writing_pane.styles.width = "100%"
             writing_pane.styles.height = "100%"
         elif layout_mode == "side":
             workspace.styles.layout = "horizontal"
             exercise_pane.display = True
             writing_pane.display = True
+            project_pane.display = False
             exercise_pane.styles.width = f"{ratio_left}%"
             writing_pane.styles.width = f"{ratio_right}%"
             exercise_pane.styles.height = "100%"
@@ -1305,6 +1532,7 @@ class GBTWApp(App[None]):
             workspace.styles.layout = "vertical"
             exercise_pane.display = True
             writing_pane.display = True
+            project_pane.display = False
             exercise_pane.styles.height = "50%"
             writing_pane.styles.height = "50%"
             exercise_pane.styles.width = "100%"
@@ -1342,8 +1570,11 @@ class GBTWApp(App[None]):
     def _exercise_mode_available(self, exercise: Exercise | None) -> bool:
         return self._exercise_supports_writing(exercise) and bool(exercise.guided_questions)
 
-    def _project_mode_available(self, exercise: Exercise | None) -> bool:
-        return exercise is not None and exercise.project_key is not None
+    def _project_mode_available(self, exercise: Exercise | None = None) -> bool:
+        if self.database is not None and self.database.get_preference("project_unlocked") == "1":
+            return True
+        target = self.current_exercise if exercise is None else exercise
+        return target is not None and target.project_key is not None
 
     def _can_write_current_exercise(self) -> bool:
         return self._exercise_supports_writing(self.current_exercise)
@@ -1468,8 +1699,8 @@ class GBTWApp(App[None]):
 
     def _load_editor_for_exercise(self, exercise: Exercise) -> None:
         effective_mode = self._effective_layout_mode(exercise)
-        if effective_mode == "project" and self._project_mode_available(exercise):
-            self._load_project_entry_into_editor(self._resolve_project_entry(exercise))
+        if effective_mode == "project":
+            self._load_project_workspace(exercise.project_key)
             return
         if self._exercise_supports_writing(exercise):
             self._load_entry_into_editor(exercise, self._resolve_entry_for_exercise(exercise, self._draft_kind_for_exercise(exercise)))
@@ -1514,6 +1745,159 @@ class GBTWApp(App[None]):
         self._update_word_count()
         self._update_draft_controls()
 
+    def _unlock_project_mode(self) -> None:
+        if self.database is not None and self.database.get_preference("project_unlocked") != "1":
+            self.database.set_preference("project_unlocked", "1")
+
+    def _load_project_workspace(self, target_project_key: str | None = None) -> None:
+        if self.database is None:
+            return
+        groups = list(self.content_index.project_groups())
+        if not groups:
+            return
+        if target_project_key is not None:
+            self.active_project_key = target_project_key
+        elif self.active_project_key is None:
+            last = self.database.get_preference("last_project")
+            if last and any(g.project_key == last for g in groups):
+                self.active_project_key = last
+            else:
+                self.active_project_key = groups[0].project_key
+        if self.active_project_key is not None:
+            self.database.set_preference("last_project", self.active_project_key)
+        name_label = self.query_one("#project-name-label", Label)
+        name_label.update(self._project_name_for_key(self.active_project_key or ""))
+        prev_btn = self.query_one("#proj-prev", Button)
+        next_btn = self.query_one("#proj-next", Button)
+        prev_btn.display = len(groups) > 1
+        next_btn.display = len(groups) > 1
+        self._rebuild_project_tree()
+        if self.current_project_doc_id is not None:
+            try:
+                doc = self.database.get_project_doc(self.current_project_doc_id)
+                if doc.project_key == self.active_project_key:
+                    self._load_project_doc(self.current_project_doc_id)
+                    return
+            except KeyError:
+                pass
+        docs = self.database.list_project_docs(self.active_project_key or "")
+        if docs:
+            self._load_project_doc(docs[0].id)
+        else:
+            self._clear_project_doc_editor()
+
+    def _project_name_for_key(self, project_key: str) -> str:
+        if self.database is None:
+            return project_key
+        project = self.database.get_project(project_key)
+        return project.title if project else project_key
+
+    def _cycle_active_project(self, direction: int) -> None:
+        groups = list(self.content_index.project_groups())
+        if not groups:
+            return
+        keys = [g.project_key for g in groups]
+        if self.active_project_key not in keys:
+            self.active_project_key = keys[0]
+        else:
+            idx = keys.index(self.active_project_key)
+            self.active_project_key = keys[(idx + direction) % len(keys)]
+        self._load_project_workspace(self.active_project_key)
+
+    def _rebuild_project_tree(self) -> None:
+        if self.database is None or self.active_project_key is None:
+            return
+        project_tree = self.query_one("#project-tree", OptionList)
+        docs = self.database.list_project_docs(self.active_project_key)
+        docs_by_category: dict[str, list[ProjectDocRecord]] = {}
+        for doc in docs:
+            docs_by_category.setdefault(doc.category, []).append(doc)
+        all_categories = list(BUILTIN_CATEGORIES)
+        for cat in docs_by_category:
+            if cat not in all_categories:
+                all_categories.append(cat)
+        options: list = []
+        for category in all_categories:
+            expanded = self._project_tree_expanded.get(category, True)
+            arrow = "▼" if expanded else "▶"
+            cat_text = Text(f"{arrow} {category}", style="bold #c4cdd2")
+            options.append(Option(cat_text, id=f"cat:{category}"))
+            if expanded:
+                cat_docs = docs_by_category.get(category, [])
+                for doc in cat_docs:
+                    marker = "●" if doc.id == self.current_project_doc_id else "·"
+                    doc_text = Text(f"  {marker} {doc.title}", style="#d9d5cf")
+                    options.append(Option(doc_text, id=f"doc:{doc.id}"))
+                options.append(Option(Text("  + Add", style="#5a8a6a"), id=f"add:{category}"))
+        if options:
+            options.append(None)
+        options.append(Option(Text("+ New category", style="#5a8a6a"), id="newcat"))
+        project_tree.clear_options()
+        project_tree.add_options(options)
+
+    def _load_project_doc(self, doc_id: int) -> None:
+        if self.database is None:
+            return
+        try:
+            doc = self.database.get_project_doc(doc_id)
+        except KeyError:
+            return
+        self.current_project_doc_id = doc_id
+        self._project_doc_dirty = False
+        title_input = self.query_one("#project-doc-title", Input)
+        title_input.value = doc.title
+        editor = self.query_one("#project-doc-editor", TextArea)
+        self._loading_project_doc = True
+        editor.load_text(doc.content)
+        self._loading_project_doc = False
+        self._rebuild_project_tree()
+        self._update_word_count()
+        self._set_save_indicator("Saved ✓", "saved")
+
+    def _clear_project_doc_editor(self) -> None:
+        self.current_project_doc_id = None
+        self._project_doc_dirty = False
+        title_input = self.query_one("#project-doc-title", Input)
+        title_input.value = ""
+        editor = self.query_one("#project-doc-editor", TextArea)
+        self._loading_project_doc = True
+        editor.load_text("")
+        self._loading_project_doc = False
+        self._update_word_count()
+
+    def _mark_project_doc_dirty(self) -> None:
+        self._project_doc_dirty = True
+        self._set_save_indicator("Unsaved •", "unsaved")
+        self._update_word_count()
+        self._project_doc_autosave_gen += 1
+        gen = self._project_doc_autosave_gen
+        self.set_timer(
+            self.autosave_delay_seconds,
+            lambda: self.call_after_refresh(self._autosave_project_doc_if_current, gen),
+        )
+
+    def _autosave_project_doc_if_current(self, gen: int) -> None:
+        if gen != self._project_doc_autosave_gen:
+            return
+        if not self._project_doc_dirty:
+            return
+        self.run_worker(self._save_project_doc("autosave"), exclusive=False)
+
+    async def _save_project_doc(self, reason: str) -> None:
+        if self.current_project_doc_id is None or self.database is None:
+            return
+        editor = self.query_one("#project-doc-editor", TextArea)
+        self._project_doc_save_gen += 1
+        gen = self._project_doc_save_gen
+        self._set_save_indicator("Saving…", "saving")
+        self.database.update_project_doc_content(self.current_project_doc_id, editor.text)
+        if gen != self._project_doc_save_gen:
+            return
+        self._project_doc_dirty = False
+        self._set_save_indicator("Saved ✓", "saved")
+        if reason == "manual":
+            self.set_timer(1.5, lambda: self.call_after_refresh(self._restore_saved_indicator))
+
     def _editor_text_for_record(self, exercise: Exercise, record: EntryRecord) -> str:
         if record.content:
             return record.content
@@ -1536,6 +1920,10 @@ class GBTWApp(App[None]):
         if self._sprint_seconds_remaining > 0:
             minutes, seconds = divmod(self._sprint_seconds_remaining, 60)
             label.update(f"Sprint: {minutes:02d}:{seconds:02d}")
+            return
+        if self._effective_layout_mode() == "project":
+            editor = self.query_one("#project-doc-editor", TextArea)
+            label.update(f"Word count: {word_count(editor.text)}")
             return
         editor = self.query_one("#editor", TextArea)
         label.update(f"Word count: {word_count(editor.text)}")
