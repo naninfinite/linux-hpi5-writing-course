@@ -34,6 +34,44 @@ class FakeEditor:
         self.focused = True
 
 
+class FakeInput:
+    def __init__(self) -> None:
+        self.value = ""
+        self.focused = False
+
+    def focus(self) -> None:
+        self.focused = True
+
+
+class FakeLabel:
+    def __init__(self) -> None:
+        self.value = ""
+        self.display = True
+
+    def update(self, value) -> None:
+        self.value = str(value)
+
+
+class FakeButton:
+    def __init__(self) -> None:
+        self.display = True
+
+
+class FakeProjectTree:
+    def __init__(self) -> None:
+        self.options: list = []
+        self.focused = False
+
+    def clear_options(self) -> None:
+        self.options = []
+
+    def add_options(self, options) -> None:
+        self.options.extend(options)
+
+    def focus(self) -> None:
+        self.focused = True
+
+
 class HarnessApp(GBTWApp):
     def __init__(self, *, database: Database, content_root: Path) -> None:
         super().__init__(
@@ -43,6 +81,12 @@ class HarnessApp(GBTWApp):
             sprint_tick_seconds=0.01,
         )
         self.editor = FakeEditor()
+        self.project_doc_editor = FakeEditor()
+        self.project_doc_title = FakeInput()
+        self.project_name_label = FakeLabel()
+        self.proj_prev_btn = FakeButton()
+        self.proj_next_btn = FakeButton()
+        self.project_tree = FakeProjectTree()
         self.focus_target: str | None = None
         self.markdown_text = ""
         self.bottom_bar_updates = 0
@@ -60,6 +104,18 @@ class HarnessApp(GBTWApp):
     def query_one(self, selector: str, expected_type=None):  # type: ignore[override]
         if selector == "#editor":
             return self.editor
+        if selector == "#project-doc-editor":
+            return self.project_doc_editor
+        if selector == "#project-doc-title":
+            return self.project_doc_title
+        if selector == "#project-name-label":
+            return self.project_name_label
+        if selector == "#proj-prev":
+            return self.proj_prev_btn
+        if selector == "#proj-next":
+            return self.proj_next_btn
+        if selector == "#project-tree":
+            return self.project_tree
         raise AssertionError(f"unexpected selector {selector}")
 
     async def _update_exercise_markdown(self, markdown_text: str) -> None:
@@ -831,8 +887,8 @@ Body
 
             self.assertEqual(app.current_layout_mode, "project")
             self.assertEqual(app._effective_layout_mode(), "project")
-            self.assertFalse(app.editor.disabled)
-            self.assertEqual(app.focus_target, "editor")
+            self.assertEqual(app.active_project_key, "part2-novel")
+            self.assertTrue(app.project_tree.focused)
             db.close()
 
     async def test_action_show_exercise_list_passes_database_project_titles(self) -> None:
@@ -1036,7 +1092,7 @@ Prompt
             self.assertEqual(db.get_latest_entry("part1/exercise.md", "exercise").content, exercise_text)
             db.close()
 
-    async def test_project_mode_reuses_same_shared_draft_across_linked_docs(self) -> None:
+    async def test_project_mode_keeps_active_project_across_linked_docs(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "content"
             (root / "part2").mkdir(parents=True)
@@ -1075,17 +1131,21 @@ Prompt
 
             await app._open_exercise_by_id("part2/seed.md", save_current=False)
             await app.action_set_mode("project")
-            first_project_entry = app.current_entry_id
-            app.editor.text = "shared manuscript"
-            app._set_save_indicator("Unsaved •", "unsaved")
+            self.assertEqual(app.active_project_key, "part2-novel")
+
+            # Create a doc to track persistence across exercise navigation
+            doc = db.create_project_doc("part2-novel", "Characters", "Hero")
+            app._load_project_doc(doc.id)
+            saved_doc_id = app.current_project_doc_id
 
             await app._open_exercise_by_id("part2/reading.md")
 
-            self.assertEqual(app.current_entry_id, first_project_entry)
-            self.assertEqual(app.editor.text, "shared manuscript")
+            # Active project and selected doc remain the same
+            self.assertEqual(app.active_project_key, "part2-novel")
+            self.assertEqual(app.current_project_doc_id, saved_doc_id)
             db.close()
 
-    async def test_project_mode_falls_back_to_freewrite_on_unlinked_writable_doc(self) -> None:
+    async def test_project_mode_stays_available_after_unlock_on_unlinked_doc(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "content"
             (root / "part2").mkdir(parents=True)
@@ -1120,10 +1180,12 @@ Prompt
 
             await app._open_exercise_by_id("part2/linked.md", save_current=False)
             await app.action_set_mode("project")
+            # Once unlocked, project mode is always available
             await app._open_exercise_by_id("part2/freewrite.md")
 
-            self.assertEqual(app._effective_layout_mode(), "freewrite")
-            self.assertFalse(app.editor.disabled)
+            # Project mode should still be active (permanently unlocked)
+            self.assertEqual(app._effective_layout_mode(), "project")
+            self.assertTrue(app._project_mode_available())
             db.close()
 
     async def test_history_scopes_to_current_draft_kind(self) -> None:
@@ -1177,7 +1239,7 @@ Prompt
             )
             db.close()
 
-    async def test_project_history_uses_project_entries_and_title(self) -> None:
+    async def test_project_workspace_loads_and_unlocks_on_project_exercise(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "content"
             (root / "part4").mkdir(parents=True)
@@ -1200,14 +1262,25 @@ Prompt
             app = HarnessApp(database=db, content_root=root)
 
             await app._open_exercise_by_id("part4/portfolio.md", save_current=False)
-            await app.action_set_mode("project")
-            app.editor.text = "portfolio manuscript"
-            app._set_save_indicator("Unsaved •", "unsaved")
-            await app._save_current_entry("manual")
-            await app.action_show_history()
+            # Project mode should be unlocked after navigating to a project exercise
+            self.assertEqual(db.get_preference("project_unlocked"), "1")
 
-            self.assertEqual(app.pushed_screen.title, "part4-portfolio")
-            self.assertEqual(app.pushed_screen.entries[0].project_key, "part4-portfolio")
+            await app.action_set_mode("project")
+            # Active project key should be set
+            self.assertEqual(app.active_project_key, "part4-portfolio")
+            # Project tree should have been rebuilt with categories
+            self.assertTrue(len(app.project_tree.options) > 0)
+            # No docs yet — current_project_doc_id should be None
+            self.assertIsNone(app.current_project_doc_id)
+            # Create a doc and verify save works
+            doc = db.create_project_doc("part4-portfolio", "Characters", "Mira")
+            app._load_project_doc(doc.id)
+            self.assertEqual(app.current_project_doc_id, doc.id)
+            app.project_doc_editor.text = "Mira is a courier in the lower city."
+            app._mark_project_doc_dirty()
+            await app._save_project_doc("manual")
+            saved = db.get_project_doc(doc.id)
+            self.assertEqual(saved.content, "Mira is a courier in the lower city.")
             db.close()
 
     async def test_project_mode_seeds_from_seed_doc_freewrite_history(self) -> None:
