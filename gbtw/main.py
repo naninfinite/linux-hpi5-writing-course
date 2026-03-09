@@ -14,10 +14,20 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.timer import Timer
-from textual.widgets import Button, Input, Label, MarkdownViewer, OptionList, Static, TextArea
+from textual.widgets import (
+    Button,
+    Input,
+    Label,
+    MarkdownViewer,
+    OptionList,
+    Static,
+    TabbedContent,
+    TabPane,
+    TextArea,
+)
 from textual.widgets.option_list import Option
 
-from .content import ContentIndex, Exercise, load_content_index
+from .content import ContentIndex, Exercise, ProjectGroup, load_content_index
 from .db import Database, EntryRecord, ProjectEntryRecord
 
 SIDE_RATIOS: tuple[tuple[int, int], ...] = ((40, 60), (50, 50), (60, 40))
@@ -62,12 +72,14 @@ TYPE_COLORS = {
 STATUS_COLORS = {
     "optional": "#e9b96e",
     "archived": "#7b8794",
+    "ongoing": "#6eb6a4",
 }
 PART_COLOR = "#d2c36b"
 MODULE_COLOR = "#b7c0c7"
 TEXT_COLOR = "#d9d5cf"
 MUTED_TEXT_COLOR = "#9dacb5"
 CURRENT_MARKER_COLOR = "#a9c3d3"
+PROJECT_META_COLOR = "#91a3ad"
 
 
 def word_count(text: str) -> int:
@@ -78,6 +90,55 @@ def format_entry_label(entry: EntryRecord | ProjectEntryRecord) -> str:
     timestamp = entry.updated_at.astimezone().strftime("%Y-%m-%d %H:%M")
     preview = entry.content.strip().splitlines()[0] if entry.content.strip() else "(empty)"
     return f"{timestamp}  {preview[:60]}"
+
+
+def format_project_indicator(exercise: Exercise | None) -> str:
+    if exercise is None or exercise.project_key is None:
+        return ""
+    role = exercise.effective_project_role or "contributor"
+    if exercise.project_seed:
+        if role == "seed":
+            return f"{exercise.project_key} · seed"
+        if exercise.project_role is None:
+            return f"{exercise.project_key} · seed"
+        return f"{exercise.project_key} · {role} [seed]"
+    return f"{exercise.project_key} · {role}"
+
+
+def format_exercise_option_label(exercise: Exercise, current_exercise_id: str | None) -> Text:
+    label = Text("    ")
+    label.append(exercise.title, style=TYPE_COLORS.get(exercise.type, TEXT_COLOR))
+    if exercise.status in {"optional", "archived", "ongoing"}:
+        label.append(f" [{exercise.status}]", style=STATUS_COLORS.get(exercise.status, MUTED_TEXT_COLOR))
+    if exercise.exercise_id == current_exercise_id:
+        label.append(" *", style=f"bold {CURRENT_MARKER_COLOR}")
+    return label
+
+
+def format_project_summary_option(title: str, group: ProjectGroup) -> Text:
+    parts_prefix = "Part" if len(group.parts) == 1 else "Parts"
+    parts_text = ", ".join(str(part) for part in group.parts)
+    seed_title = group.seed.title if group.seed is not None else "none"
+    summary = Text(title, style=f"bold {PART_COLOR}")
+    summary.append(f" · {parts_prefix} {parts_text}", style=MODULE_COLOR)
+    summary.append(f" · {group.contributor_count} docs", style=MUTED_TEXT_COLOR)
+    summary.append(" · seed: ", style=MUTED_TEXT_COLOR)
+    summary.append(seed_title, style=TEXT_COLOR if group.seed is not None else MUTED_TEXT_COLOR)
+    return summary
+
+
+def format_project_contributor_option(exercise: Exercise, current_exercise_id: str | None) -> Text:
+    label = Text(f"Part {exercise.part} · ", style=f"bold {PART_COLOR}")
+    label.append(exercise.title, style=TYPE_COLORS.get(exercise.type, TEXT_COLOR))
+    if exercise.project_seed:
+        label.append(" [seed]", style=TYPE_COLORS["long-term"])
+    if exercise.project_role == "consolidator":
+        label.append(" [end]", style=TYPE_COLORS["exercise"])
+    if exercise.status == "ongoing":
+        label.append(" [ongoing]", style=STATUS_COLORS["ongoing"])
+    if exercise.exercise_id == current_exercise_id:
+        label.append(" *", style=f"bold {CURRENT_MARKER_COLOR}")
+    return label
 
 
 class HelpScreen(ModalScreen[None]):
@@ -208,25 +269,49 @@ class ExerciseListScreen(ModalScreen[str | None]):
     BINDINGS = [
         Binding("escape", "dismiss_screen", "Close", show=False),
         Binding("ctrl+a", "toggle_archived", "Archived", show=False),
+        Binding("tab", "next_tab", "Next Tab", show=False),
+        Binding("shift+tab", "previous_tab", "Previous Tab", show=False),
+        Binding("left", "focus_project_list", "Projects", show=False),
+        Binding("right", "focus_project_documents", "Documents", show=False),
     ]
 
     show_archived = reactive(False)
+    TAB_EXERCISES = "exercise-tab"
+    TAB_PROJECTS = "projects-tab"
 
-    def __init__(self, content_index: ContentIndex, current_exercise_id: str | None) -> None:
+    def __init__(
+        self,
+        content_index: ContentIndex,
+        current_exercise_id: str | None,
+        project_titles: dict[str, str] | None = None,
+    ) -> None:
         super().__init__()
         self.content_index = content_index
         self.current_exercise_id = current_exercise_id
+        self.project_titles = project_titles or {}
 
     def compose(self) -> ComposeResult:
         with Container(id="modal", classes="wide-modal"):
             yield Static("Exercise List", classes="modal-title")
             yield Label("", id="exercise-list-hint")
-            yield OptionList(id="exercise-list")
+            with TabbedContent(initial=self.TAB_EXERCISES, id="exercise-list-tabs"):
+                with TabPane("Exercises", id=self.TAB_EXERCISES):
+                    yield OptionList(id="exercise-list")
+                with TabPane("Projects", id=self.TAB_PROJECTS):
+                    with Horizontal(id="projects-browser"):
+                        with Vertical(classes="projects-pane"):
+                            yield Static("Projects", classes="project-pane-title")
+                            yield OptionList(id="project-list")
+                        with Vertical(classes="projects-pane"):
+                            yield Static("Contributors", id="project-documents-title", classes="project-pane-title")
+                            yield OptionList(id="project-document-list")
             yield Button("Close", id="exercise-list-close")
 
     def on_mount(self) -> None:
         self._refresh_options()
+        self._refresh_project_options()
         self.query_one("#exercise-list", OptionList).focus()
+        self._update_hint()
 
     def action_dismiss_screen(self) -> None:
         self.dismiss(None)
@@ -234,12 +319,60 @@ class ExerciseListScreen(ModalScreen[str | None]):
     def action_toggle_archived(self) -> None:
         self.show_archived = not self.show_archived
         self._refresh_options()
+        self._update_hint()
+
+    def action_next_tab(self) -> None:
+        self._set_active_tab(self.TAB_PROJECTS if self._active_tab() == self.TAB_EXERCISES else self.TAB_EXERCISES)
+
+    def action_previous_tab(self) -> None:
+        self.action_next_tab()
+
+    def action_focus_project_list(self) -> None:
+        if self._active_tab() != self.TAB_PROJECTS:
+            return
+        project_list = self.query_one("#project-list", OptionList)
+        if project_list.option_count == 0:
+            self.app.bell()
+            return
+        project_list.focus()
+
+    def action_focus_project_documents(self) -> None:
+        if self._active_tab() != self.TAB_PROJECTS:
+            return
+        document_list = self.query_one("#project-document-list", OptionList)
+        if document_list.option_count == 0:
+            self.app.bell()
+            return
+        document_list.focus()
 
     @on(OptionList.OptionSelected, "#exercise-list")
     def on_exercise_selected(self, event: OptionList.OptionSelected) -> None:
         option_id = event.option_id
         if option_id and option_id.startswith("exercise:"):
             self.dismiss(option_id.split(":", 1)[1])
+
+    @on(OptionList.OptionHighlighted, "#project-list")
+    def on_project_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        option_id = event.option_id
+        if option_id and option_id.startswith("project:"):
+            self._refresh_project_documents(option_id.split(":", 1)[1])
+
+    @on(OptionList.OptionSelected, "#project-list")
+    def on_project_selected(self, event: OptionList.OptionSelected) -> None:
+        option_id = event.option_id
+        if option_id and option_id.startswith("project:"):
+            self._refresh_project_documents(option_id.split(":", 1)[1])
+            self.action_focus_project_documents()
+
+    @on(OptionList.OptionSelected, "#project-document-list")
+    def on_project_document_selected(self, event: OptionList.OptionSelected) -> None:
+        option_id = event.option_id
+        if option_id and option_id.startswith("exercise:"):
+            self.dismiss(option_id.split(":", 1)[1])
+
+    @on(TabbedContent.TabActivated, "#exercise-list-tabs")
+    def on_tab_activated(self, _event: TabbedContent.TabActivated) -> None:
+        self._update_hint()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "exercise-list-close":
@@ -275,17 +408,114 @@ class ExerciseListScreen(ModalScreen[str | None]):
                             disabled=True,
                         )
                     )
-                label = Text("    ")
-                label.append(exercise.title, style=TYPE_COLORS.get(exercise.type, TEXT_COLOR))
-                if exercise.status == "optional":
-                    label.append(" [optional]", style=STATUS_COLORS["optional"])
-                elif exercise.status == "archived":
-                    label.append(" [archived]", style=STATUS_COLORS["archived"])
-                if exercise.exercise_id == self.current_exercise_id:
-                    label.append(" *", style=f"bold {CURRENT_MARKER_COLOR}")
-                options.append(Option(label, id=f"exercise:{exercise.exercise_id}"))
+                options.append(
+                    Option(
+                        format_exercise_option_label(exercise, self.current_exercise_id),
+                        id=f"exercise:{exercise.exercise_id}",
+                    )
+                )
         option_list.clear_options()
         option_list.add_options(options)
+
+    def _refresh_project_options(self) -> None:
+        project_list = self.query_one("#project-list", OptionList)
+        groups = self._project_groups_for_display()
+        options: list[Option] = []
+        for group in groups:
+            options.append(
+                Option(
+                    format_project_summary_option(self._project_title_for_group(group), group),
+                    id=f"project:{group.project_key}",
+                )
+            )
+        project_list.clear_options()
+        project_list.add_options(options)
+        if not groups:
+            self._refresh_project_documents(None)
+            return
+        current_project_key = None
+        current_exercise = self.content_index.get(self.current_exercise_id) if self.current_exercise_id else None
+        if current_exercise is not None:
+            current_project_key = current_exercise.project_key
+        selected_index = next(
+            (
+                index
+                for index, group in enumerate(groups)
+                if group.project_key == current_project_key
+            ),
+            0,
+        )
+        project_list.highlighted = selected_index
+        self._refresh_project_documents(groups[selected_index].project_key)
+
+    def _refresh_project_documents(self, project_key: str | None) -> None:
+        title = self.query_one("#project-documents-title", Static)
+        option_list = self.query_one("#project-document-list", OptionList)
+        group = self._project_group_map().get(project_key or "")
+        option_list.clear_options()
+        if group is None:
+            title.update("Contributors")
+            return
+        title.update(f"{self._project_title_for_group(group)} contributors")
+        options = [
+            Option(
+                format_project_contributor_option(item.exercise, self.current_exercise_id),
+                id=f"exercise:{item.exercise.exercise_id}",
+            )
+            for item in group.contributors
+        ]
+        option_list.add_options(options)
+        current_index = next(
+            (
+                index
+                for index, item in enumerate(group.contributors)
+                if item.exercise.exercise_id == self.current_exercise_id
+            ),
+            0,
+        )
+        option_list.highlighted = current_index
+
+    def _project_groups_for_display(self) -> list[ProjectGroup]:
+        groups = list(self.content_index.project_groups())
+        groups.sort(
+            key=lambda group: (
+                self._project_title_for_group(group).lower(),
+                group.project_key.lower(),
+            )
+        )
+        return groups
+
+    def _project_group_map(self) -> dict[str, ProjectGroup]:
+        return {group.project_key: group for group in self._project_groups_for_display()}
+
+    def _project_title_for_group(self, group: ProjectGroup) -> str:
+        return self.project_titles.get(group.project_key) or group.legacy_title or group.project_key
+
+    def _active_tab(self) -> str:
+        return self.query_one("#exercise-list-tabs", TabbedContent).active
+
+    def _set_active_tab(self, tab_id: str) -> None:
+        tabs = self.query_one("#exercise-list-tabs", TabbedContent)
+        tabs.active = tab_id
+        self._update_hint()
+        if tab_id == self.TAB_PROJECTS:
+            self.action_focus_project_list()
+            return
+        self.query_one("#exercise-list", OptionList).focus()
+
+    def _update_hint(self) -> None:
+        hint = self.query_one("#exercise-list-hint", Label)
+        if self._active_tab() == self.TAB_PROJECTS:
+            hint.update(
+                "Projects across parts. Enter on a project shows contributors. "
+                "Enter on a contributor opens it. Left/Right moves between lists."
+            )
+            return
+        hint.update(
+            "Grouped by Part and Module. Enter opens an exercise. "
+            "Ctrl+A toggles archived exercises "
+            f"({'shown' if self.show_archived else 'hidden'}). Tab switches to Projects."
+        )
 
 
 class FooterControl(Static):
@@ -532,7 +762,7 @@ class GBTWApp(App[None]):
         margin-bottom: 1;
     }
 
-    #help-text, #preview-scroll, #history-list, #exercise-list {
+    #help-text, #preview-scroll, #history-list, #exercise-list, #project-list, #project-document-list, #exercise-list-tabs, #projects-browser {
         height: 1fr;
     }
 
@@ -542,6 +772,29 @@ class GBTWApp(App[None]):
 
     #exercise-list-hint, #history-empty {
         color: #9dacb5;
+    }
+
+    #exercise-list-tabs {
+        margin-bottom: 1;
+    }
+
+    #exercise-list-tabs TabPane {
+        padding: 0;
+    }
+
+    .projects-pane {
+        width: 1fr;
+        height: 1fr;
+    }
+
+    .projects-pane:first-child {
+        margin-right: 1;
+    }
+
+    .project-pane-title {
+        color: #b8c4cb;
+        margin-bottom: 1;
+        text-style: bold;
     }
 
     #preview-body {
@@ -586,6 +839,11 @@ class GBTWApp(App[None]):
         margin-bottom: 1;
     }
 
+    #project-indicator {
+        color: #91a3ad;
+        margin-left: 1;
+    }
+
     .field-label {
         margin-top: 1;
     }
@@ -622,6 +880,10 @@ class GBTWApp(App[None]):
         super().__init__()
         self.database: Database | None = database or Database()
         self.content_index = content_index or load_content_index()
+        if self.database is not None:
+            self.database.sync_projects(
+                group.project_key for group in self.content_index.project_groups()
+            )
         self.autosave_delay_seconds = autosave_delay_seconds
         self.sprint_tick_seconds = sprint_tick_seconds
         self.current_exercise: Exercise | None = None
@@ -672,6 +934,7 @@ class GBTWApp(App[None]):
                 yield FooterControl("?", control_id="help-button")
             with Horizontal(id="status-strip"):
                 yield Label("Word count: 0", id="word-count")
+                yield Label("", id="project-indicator")
                 yield Label("Saved ✓", id="save-indicator", classes="saved")
 
     async def on_mount(self) -> None:
@@ -757,6 +1020,7 @@ class GBTWApp(App[None]):
             ExerciseListScreen(
                 self.content_index,
                 self.current_exercise.exercise_id if self.current_exercise else None,
+                self._content_project_titles(),
             ),
             callback=self._on_exercise_list_closed,
         )
@@ -817,6 +1081,17 @@ class GBTWApp(App[None]):
         if self.database is not None:
             self.database.close()
             self.database = None
+
+    def _content_project_titles(self) -> dict[str, str]:
+        titles: dict[str, str] = {}
+        for group in self.content_index.project_groups():
+            if self.database is not None:
+                project = self.database.get_project(group.project_key)
+                if project is not None:
+                    titles[group.project_key] = project.title
+                    continue
+            titles[group.project_key] = group.legacy_title or group.project_key
+        return titles
 
     async def on_key(self, event: events.Key) -> None:
         if event.key in {"question_mark", "?"}:
@@ -903,6 +1178,7 @@ class GBTWApp(App[None]):
         self.current_entry_id = None
         self.query_one("#exercise-title", Label).update("No exercises found")
         self.query_one("#exercise-meta", Label).update("Run install.sh to create sample content.")
+        self._update_project_indicator(None)
         await self._update_exercise_markdown("# No exercises found\n\nRun install.sh to create sample content.")
         self._load_disabled_editor()
 
@@ -950,6 +1226,15 @@ class GBTWApp(App[None]):
         else:
             self._focus_editor()
 
+    def _update_project_indicator(self, exercise: Exercise | None) -> None:
+        try:
+            indicator = self.query_one("#project-indicator", Label)
+        except Exception:
+            return
+        indicator_text = format_project_indicator(exercise)
+        indicator.update(indicator_text)
+        indicator.display = bool(indicator_text)
+
     def _update_exercise_header(self, exercise: Exercise) -> None:
         try:
             title = self.query_one("#exercise-title", Label)
@@ -968,10 +1253,11 @@ class GBTWApp(App[None]):
         meta_text.append(exercise.module, style=MODULE_COLOR)
         meta_text.append("  ")
         meta_text.append(type_label, style=type_style)
-        if exercise.status != "active":
+        if exercise.status in {"optional", "archived"}:
             meta_text.append("  ")
             meta_text.append(f"[{exercise.status}]", style=status_style)
         meta.update(meta_text)
+        self._update_project_indicator(exercise)
 
     async def _update_exercise_markdown(self, markdown_text: str) -> None:
         viewer = self.query_one("#exercise-markdown", MarkdownViewer)
@@ -1167,6 +1453,10 @@ class GBTWApp(App[None]):
         )
 
     def _project_title_for(self, exercise: Exercise) -> str:
+        if exercise.project_key is not None and self.database is not None:
+            project = self.database.get_project(exercise.project_key)
+            if project is not None:
+                return project.title
         return exercise.project_title or exercise.title
 
     def _resolve_project_entry(self, exercise: Exercise) -> ProjectEntryRecord:
