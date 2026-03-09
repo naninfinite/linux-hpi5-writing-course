@@ -12,8 +12,9 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.reactive import reactive
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
+from textual.types import NoActiveAppError
 from textual.widgets import (
     Button,
     Input,
@@ -29,6 +30,12 @@ from textual.widgets.option_list import Option
 
 from .content import ContentIndex, Exercise, ProjectGroup, load_content_index
 from .db import Database, EntryRecord, ProjectDocRecord, ProjectEntryRecord
+from .profiles import (
+    ProfileRecord,
+    ProfileRegistryError,
+    ProfileStore,
+    ProfileValidationError,
+)
 
 SIDE_RATIOS: tuple[tuple[int, int], ...] = ((40, 60), (50, 50), (60, 40))
 BUILTIN_CATEGORIES: tuple[str, ...] = ("Characters", "Locations", "Worldbuilding", "Plot Notes", "Notes")
@@ -81,6 +88,7 @@ TEXT_COLOR = "#d9d5cf"
 MUTED_TEXT_COLOR = "#9dacb5"
 CURRENT_MARKER_COLOR = "#a9c3d3"
 PROJECT_META_COLOR = "#91a3ad"
+PROJECT_INDICATOR_COLOR = "#c2b268"
 
 
 def word_count(text: str) -> int:
@@ -104,6 +112,23 @@ def format_project_indicator(exercise: Exercise | None) -> str:
             return f"{exercise.project_key} · seed"
         return f"{exercise.project_key} · {role} [seed]"
     return f"{exercise.project_key} · {role}"
+
+
+def format_footer_control_label(
+    label: str,
+    *,
+    show_indicator: bool = False,
+    accent_indicator: bool = True,
+) -> Text:
+    text = Text(label)
+    if not show_indicator:
+        return text
+    text.append(" ")
+    if accent_indicator:
+        text.append("•", style=PROJECT_INDICATOR_COLOR)
+    else:
+        text.append("•")
+    return text
 
 
 def format_exercise_option_label(exercise: Exercise, current_exercise_id: str | None) -> Text:
@@ -542,6 +567,125 @@ class ExerciseListScreen(ModalScreen[str | None]):
         )
 
 
+class ProfilePickerScreen(ModalScreen[ProfileRecord | str | None]):
+    BINDINGS = [
+        Binding("enter", "open_selected", "Open", show=False),
+        Binding("n", "new_profile", "New", show=False),
+        Binding("escape", "quit_picker", "Quit", show=False),
+    ]
+
+    def __init__(
+        self,
+        profiles: list[ProfileRecord],
+        *,
+        selected_profile_id: str | None = None,
+        message: str = "",
+        message_style: str = "profile-help",
+    ) -> None:
+        super().__init__()
+        self.profiles = profiles
+        self.selected_profile_id = selected_profile_id
+        self.message = message
+        self.message_style = message_style
+
+    def compose(self) -> ComposeResult:
+        with Container(id="profile-picker"):
+            yield Static("Choose Profile", id="profile-picker-title")
+            yield Static(
+                self.message or "Each profile keeps its own progress, preferences, and project history.",
+                id="profile-picker-message",
+                classes=self.message_style,
+            )
+            options = [
+                Option(
+                    Text.assemble(
+                        (profile.display_name, "bold #e7dfcf"),
+                        ("  "),
+                        (profile.profile_id, MUTED_TEXT_COLOR),
+                    ),
+                    id=profile.profile_id,
+                )
+                for profile in self.profiles
+            ]
+            yield OptionList(*options, id="profile-picker-list")
+            with Horizontal(id="profile-picker-actions", classes="button-row"):
+                yield Button("Open", id="profile-open")
+                yield Button("New Profile", id="profile-new")
+                yield Button("Quit", id="profile-quit")
+
+    def on_mount(self) -> None:
+        option_list = self.query_one("#profile-picker-list", OptionList)
+        if self.profiles:
+            selected_index = next(
+                (
+                    index
+                    for index, profile in enumerate(self.profiles)
+                    if profile.profile_id == self.selected_profile_id
+                ),
+                0,
+            )
+            option_list.highlighted = selected_index
+            option_list.focus()
+        else:
+            self.query_one("#profile-new", Button).focus()
+
+    def action_open_selected(self) -> None:
+        option_list = self.query_one("#profile-picker-list", OptionList)
+        if not self.profiles:
+            self.app.bell()
+            return
+        highlighted = option_list.highlighted
+        if highlighted is None:
+            highlighted = 0
+        selected_index = max(0, min(highlighted, len(self.profiles) - 1))
+        selected = self.profiles[selected_index]
+        if selected is None:
+            self.app.bell()
+            return
+        self.dismiss(selected)
+
+    def action_new_profile(self) -> None:
+        self.dismiss("__new__")
+
+    def action_quit_picker(self) -> None:
+        self.dismiss(None)
+
+    @on(OptionList.OptionSelected, "#profile-picker-list")
+    def on_profile_selected(self, _event: OptionList.OptionSelected) -> None:
+        self.action_open_selected()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "profile-open":
+            self.action_open_selected()
+        elif event.button.id == "profile-new":
+            self.action_new_profile()
+        elif event.button.id == "profile-quit":
+            self.action_quit_picker()
+
+
+class BlockingMessageScreen(ModalScreen[None]):
+    BINDINGS = [Binding("escape", "dismiss_message", "Close", show=False)]
+
+    def __init__(self, title: str, message: str, button_label: str = "Quit") -> None:
+        super().__init__()
+        self._title = title
+        self._message = message
+        self._button_label = button_label
+
+    def compose(self) -> ComposeResult:
+        with Container(id="blocking-screen"):
+            yield Static(self._title, id="blocking-title")
+            yield Static(self._message, id="blocking-message")
+            yield Button(self._button_label, id="blocking-close")
+
+    def action_dismiss_message(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "blocking-close":
+            self.dismiss(None)
+
+
 class FooterControl(Static):
     can_focus = True
     BINDINGS = [
@@ -555,18 +699,47 @@ class FooterControl(Static):
             self.control_id = control_id
 
     def __init__(self, label: str, *, control_id: str) -> None:
-        super().__init__(label, id=control_id, classes="footer-control")
+        self._label = label
+        self._show_indicator = False
+        self._is_active = False
+        super().__init__(
+            format_footer_control_label(label),
+            id=control_id,
+            classes="footer-control",
+        )
         self._is_disabled = False
         self._detail = ""
+
+    def set_active(self, active: bool) -> None:
+        self._is_active = active
+        self.set_class(active, "active-mode")
+        self._sync_label()
 
     def set_disabled(self, disabled: bool) -> None:
         self._is_disabled = disabled
         self.set_class(disabled, "disabled")
+        self._sync_label()
         self._sync_tooltip()
 
     def set_detail(self, detail: str) -> None:
         self._detail = detail
         self._sync_tooltip()
+
+    def set_indicator(self, show_indicator: bool) -> None:
+        self._show_indicator = show_indicator
+        self._sync_label()
+
+    def _sync_label(self) -> None:
+        try:
+            self.update(
+                format_footer_control_label(
+                    self._label,
+                    show_indicator=self._show_indicator,
+                    accent_indicator=not self._is_active and not self._is_disabled,
+                )
+            )
+        except NoActiveAppError:
+            return
 
     def _sync_tooltip(self) -> None:
         self.tooltip = None if self._is_disabled or not self._detail else self._detail
@@ -789,6 +962,46 @@ class GBTWApp(App[None]):
         width: 100;
     }
 
+    #profile-picker, #blocking-screen {
+        width: 100%;
+        height: 100%;
+        padding: 2 3;
+        background: #101316;
+    }
+
+    #profile-picker-title, #blocking-title {
+        color: #d2c36b;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #profile-picker-title {
+        width: 100%;
+        content-align: center middle;
+    }
+
+    #profile-picker-message, #blocking-message {
+        width: 100%;
+        margin-bottom: 1;
+    }
+
+    #profile-picker-message.profile-help {
+        color: #b8c4cb;
+    }
+
+    #profile-picker-message.profile-error, #blocking-message {
+        color: #ef6b73;
+    }
+
+    #profile-picker-list {
+        height: 1fr;
+        margin-bottom: 1;
+    }
+
+    #profile-picker-actions {
+        height: auto;
+    }
+
     .modal-title {
         color: #d2c36b;
         text-style: bold;
@@ -994,17 +1207,18 @@ class GBTWApp(App[None]):
         self,
         *,
         database: Database | None = None,
+        profile_store: ProfileStore | None = None,
         content_index: ContentIndex | None = None,
         autosave_delay_seconds: float = 4.0,
         sprint_tick_seconds: float = 1.0,
     ) -> None:
         super().__init__()
-        self.database: Database | None = database or Database()
+        self._database_was_injected = database is not None
+        self.database: Database | None = database
+        self.profile_store = profile_store or ProfileStore()
         self.content_index = content_index or load_content_index()
         if self.database is not None:
-            self.database.sync_projects(
-                group.project_key for group in self.content_index.project_groups()
-            )
+            self._sync_database_projects()
         self.autosave_delay_seconds = autosave_delay_seconds
         self.sprint_tick_seconds = sprint_tick_seconds
         self.current_exercise: Exercise | None = None
@@ -1029,6 +1243,7 @@ class GBTWApp(App[None]):
         self._project_doc_autosave_gen: int = 0
         self._project_doc_save_gen: int = 0
         self._loading_project_doc: bool = False
+        self.current_profile: ProfileRecord | None = None
 
     def compose(self) -> ComposeResult:
         with Container(id="workspace"):
@@ -1077,13 +1292,86 @@ class GBTWApp(App[None]):
 
     async def on_mount(self) -> None:
         self.title = "gbtw"
-        self.sub_title = "Getting Back to Writing"
+        self._refresh_sub_title()
+        if self.database is None:
+            self.run_worker(self._select_profile_and_start(), exclusive=True)
+            return
+        await self._initialize_after_database_ready()
+
+    async def _select_profile_and_start(self) -> None:
+        error_message = ""
+        selected_profile_id: str | None = None
+        while self.database is None:
+            try:
+                profiles = self.profile_store.list_profiles()
+            except ProfileRegistryError as exc:
+                await self.push_screen_wait(
+                    BlockingMessageScreen(
+                        "Profile Registry Error",
+                        str(exc),
+                    )
+                )
+                self.exit()
+                return
+            choice = await self.push_screen_wait(
+                ProfilePickerScreen(
+                    profiles,
+                    selected_profile_id=selected_profile_id,
+                    message=error_message,
+                    message_style="profile-error" if error_message else "profile-help",
+                )
+            )
+            error_message = ""
+            if choice is None:
+                self.exit()
+                return
+            if choice == "__new__":
+                new_name = await self.push_screen_wait(NewItemScreen("New profile name"))
+                if new_name is None:
+                    continue
+                try:
+                    created = self.profile_store.create_profile(new_name)
+                except ProfileValidationError as exc:
+                    self.bell()
+                    error_message = str(exc)
+                    continue
+                selected_profile_id = created.profile_id
+                continue
+            if isinstance(choice, ProfileRecord):
+                self._open_selected_profile(choice)
+                break
+        if self.database is None:
+            return
+        await self._initialize_after_database_ready()
+
+    async def _initialize_after_database_ready(self) -> None:
         self._restore_preferences()
         await self._load_initial_exercise()
         self._apply_layout()
         self._update_bottom_bar()
+        self._refresh_sub_title()
+
+    def _open_selected_profile(self, profile: ProfileRecord) -> None:
+        refreshed_profile = self.profile_store.mark_used(profile.profile_id)
+        self.current_profile = refreshed_profile
+        self.database = Database(refreshed_profile.db_path)
+        self._sync_database_projects()
+        self._refresh_sub_title()
+
+    def _sync_database_projects(self) -> None:
+        if self.database is None:
+            return
+        self.database.sync_projects(
+            group.project_key for group in self.content_index.project_groups()
+        )
+
+    def _refresh_sub_title(self) -> None:
+        parts = ["Getting Back to Writing"]
+        if self.current_profile is not None:
+            parts.append(self.current_profile.display_name)
         if self.content_index.warnings:
-            self.sub_title = f"Skipped {len(self.content_index.warnings)} invalid content file(s)"
+            parts.append(f"Skipped {len(self.content_index.warnings)} invalid content file(s)")
+        self.sub_title = " · ".join(parts)
 
     async def action_set_mode(self, mode: str) -> None:
         if mode not in LAYOUTS:
@@ -1554,7 +1842,12 @@ class GBTWApp(App[None]):
         can_use_project_mode = self._project_mode_available(self.current_exercise)
         for control_id, mode in mapping.items():
             control = self.query_one(f"#{control_id}", FooterControl)
-            control.set_class(mode == effective_mode, "active-mode")
+            control.set_active(mode == effective_mode)
+            control.set_indicator(
+                mode == "project"
+                and self.current_exercise is not None
+                and self.current_exercise.project_key is not None
+            )
             if mode == "exercise":
                 control.set_disabled(not can_use_exercise_mode)
             elif mode == "project":
@@ -1686,7 +1979,10 @@ class GBTWApp(App[None]):
     def _resolve_project_entry(self, exercise: Exercise) -> ProjectEntryRecord:
         assert self.database is not None
         assert exercise.project_key is not None
-        project_key = exercise.project_key
+        return self._resolve_project_entry_for_key(exercise.project_key)
+
+    def _resolve_project_entry_for_key(self, project_key: str) -> ProjectEntryRecord:
+        assert self.database is not None
         latest = self.database.get_latest_project_entry(project_key)
         if latest is not None:
             return latest
@@ -1765,6 +2061,7 @@ class GBTWApp(App[None]):
                 self.active_project_key = groups[0].project_key
         if self.active_project_key is not None:
             self.database.set_preference("last_project", self.active_project_key)
+            self._load_project_entry_into_editor(self._resolve_project_entry_for_key(self.active_project_key))
         name_label = self.query_one("#project-name-label", Label)
         name_label.update(self._project_name_for_key(self.active_project_key or ""))
         prev_btn = self.query_one("#proj-prev", Button)
