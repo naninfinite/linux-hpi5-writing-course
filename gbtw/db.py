@@ -41,6 +41,17 @@ class ProjectRecord:
     notes: str
 
 
+@dataclass(slots=True, frozen=True)
+class ProjectDocRecord:
+    id: int
+    project_key: str
+    category: str
+    title: str
+    content: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class Database:
     def __init__(self, path: Path = DB_PATH) -> None:
         self.path = path
@@ -84,6 +95,16 @@ class Database:
               updated_at TIMESTAMP NOT NULL,
               notes TEXT NOT NULL DEFAULT ''
             );
+
+            CREATE TABLE IF NOT EXISTS project_documents(
+              id INTEGER PRIMARY KEY,
+              project_key TEXT NOT NULL,
+              category TEXT NOT NULL,
+              title TEXT NOT NULL,
+              content TEXT NOT NULL DEFAULT '',
+              created_at TIMESTAMP NOT NULL,
+              updated_at TIMESTAMP NOT NULL
+            );
             """
         )
         entry_columns = {
@@ -118,6 +139,12 @@ class Database:
             """
             CREATE INDEX IF NOT EXISTS idx_projects_title_key
             ON projects(title, project_key)
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_project_documents_key_cat
+            ON project_documents(project_key, category, id)
             """
         )
         self.connection.commit()
@@ -191,6 +218,89 @@ class Database:
             """
         ).fetchall()
         return [_row_to_project(row) for row in rows]
+
+    def create_project_doc(
+        self,
+        project_key: str,
+        category: str,
+        title: str,
+        content: str = "",
+        *,
+        now: datetime | None = None,
+    ) -> ProjectDocRecord:
+        timestamp = _normalize_datetime(now)
+        cursor = self.connection.execute(
+            """
+            INSERT INTO project_documents(project_key, category, title, content, created_at, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (project_key, category, title, content, timestamp.isoformat(), timestamp.isoformat()),
+        )
+        self.connection.commit()
+        return self.get_project_doc(int(cursor.lastrowid))
+
+    def get_project_doc(self, doc_id: int) -> ProjectDocRecord:
+        row = self.connection.execute(
+            """
+            SELECT id, project_key, category, title, content, created_at, updated_at
+            FROM project_documents WHERE id = ?
+            """,
+            (doc_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"project doc {doc_id} not found")
+        return _row_to_project_doc(row)
+
+    def list_project_docs(self, project_key: str) -> list[ProjectDocRecord]:
+        rows = self.connection.execute(
+            """
+            SELECT id, project_key, category, title, content, created_at, updated_at
+            FROM project_documents
+            WHERE project_key = ?
+            ORDER BY category, id
+            """,
+            (project_key,),
+        ).fetchall()
+        return [_row_to_project_doc(row) for row in rows]
+
+    def update_project_doc_content(
+        self,
+        doc_id: int,
+        content: str,
+        *,
+        now: datetime | None = None,
+    ) -> ProjectDocRecord:
+        updated_at = _normalize_datetime(now)
+        self.connection.execute(
+            "UPDATE project_documents SET content = ?, updated_at = ? WHERE id = ?",
+            (content, updated_at.isoformat(), doc_id),
+        )
+        self.connection.commit()
+        return self.get_project_doc(doc_id)
+
+    def update_project_doc_title(
+        self,
+        doc_id: int,
+        title: str,
+        *,
+        now: datetime | None = None,
+    ) -> ProjectDocRecord:
+        updated_at = _normalize_datetime(now)
+        self.connection.execute(
+            "UPDATE project_documents SET title = ?, updated_at = ? WHERE id = ?",
+            (title, updated_at.isoformat(), doc_id),
+        )
+        self.connection.commit()
+        return self.get_project_doc(doc_id)
+
+    def delete_project_doc(self, doc_id: int) -> None:
+        cursor = self.connection.execute(
+            "DELETE FROM project_documents WHERE id = ?",
+            (doc_id,),
+        )
+        self.connection.commit()
+        if cursor.rowcount == 0:
+            raise KeyError(f"project doc {doc_id} not found")
 
     def resolve_entry_for_exercise(
         self,
@@ -464,6 +574,18 @@ def _row_to_project_entry(row: sqlite3.Row) -> ProjectEntryRecord:
         created_at=datetime.fromisoformat(str(row["created_at"])),
         updated_at=datetime.fromisoformat(str(row["updated_at"])),
         content=str(row["content"]),
+    )
+
+
+def _row_to_project_doc(row: sqlite3.Row) -> ProjectDocRecord:
+    return ProjectDocRecord(
+        id=int(row["id"]),
+        project_key=str(row["project_key"]),
+        category=str(row["category"]),
+        title=str(row["title"]),
+        content=str(row["content"]),
+        created_at=datetime.fromisoformat(str(row["created_at"])),
+        updated_at=datetime.fromisoformat(str(row["updated_at"])),
     )
 
 
