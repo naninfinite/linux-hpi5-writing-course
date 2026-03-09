@@ -25,6 +25,7 @@ def build_exercise(exercise_id: str, exercise_type: str, save_mode: str | None =
         project_key=None,
         project_title=None,
         project_seed=False,
+        project_role=None,
     )
 
 
@@ -151,6 +152,33 @@ class DatabaseTests(unittest.TestCase):
             second = db.resolve_project_entry("part2-novel")
 
             self.assertEqual(first.id, second.id)
+            self.assertIsNotNone(db.get_project("part2-novel"))
+            db.close()
+
+    def test_sync_projects_inserts_missing_rows_only(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "progress.db")
+            first_sync = db.sync_projects(["dark-fantasy-novel", "submission-story"])
+            first_updated = db.get_project("dark-fantasy-novel").updated_at
+
+            db.connection.execute(
+                """
+                UPDATE projects
+                SET title = ?, notes = ?
+                WHERE project_key = ?
+                """,
+                ("Dark Fantasy Novel", "custom", "dark-fantasy-novel"),
+            )
+            db.connection.commit()
+            second_sync = db.sync_projects(["dark-fantasy-novel", "submission-story"])
+
+            self.assertEqual(sorted(record.project_key for record in first_sync), ["dark-fantasy-novel", "submission-story"])
+            self.assertEqual(sorted(record.project_key for record in second_sync), ["dark-fantasy-novel", "submission-story"])
+            project = db.get_project("dark-fantasy-novel")
+            assert project is not None
+            self.assertEqual(project.title, "Dark Fantasy Novel")
+            self.assertEqual(project.notes, "custom")
+            self.assertEqual(project.updated_at, first_updated)
             db.close()
 
     def test_project_history_is_separate_by_project_key(self) -> None:
@@ -161,6 +189,24 @@ class DatabaseTests(unittest.TestCase):
 
             self.assertEqual(db.list_project_history("part2-novel")[0].id, first.id)
             self.assertEqual(db.list_project_history("part4-portfolio")[0].id, second.id)
+            db.close()
+
+    def test_project_entry_writes_touch_project_timestamp(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "progress.db")
+            created = datetime(2026, 3, 8, 9, 0, tzinfo=UTC)
+            updated = datetime(2026, 3, 9, 9, 0, tzinfo=UTC)
+
+            record = db.create_project_entry("part2-novel", "draft", now=created)
+            project = db.get_project("part2-novel")
+            assert project is not None
+            self.assertEqual(project.title, "part2-novel")
+            self.assertEqual(project.updated_at, created)
+
+            db.update_project_entry(record.id, "draft 2", now=updated)
+            refreshed = db.get_project("part2-novel")
+            assert refreshed is not None
+            self.assertEqual(refreshed.updated_at, updated)
             db.close()
 
     def test_seed_project_entries_copies_freewrite_history(self) -> None:
