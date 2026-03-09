@@ -16,6 +16,7 @@ try:
         FooterControl,
         GBTWApp,
         ProfilePickerResult,
+        WritingTextArea,
         format_footer_control_label,
         format_project_indicator,
     )
@@ -26,6 +27,7 @@ except ModuleNotFoundError:
     FooterControl = object  # type: ignore[assignment]
     GBTWApp = object  # type: ignore[assignment]
     ProfilePickerResult = object  # type: ignore[assignment]
+    WritingTextArea = object  # type: ignore[assignment]
     format_footer_control_label = lambda *args, **kwargs: None  # type: ignore[assignment]
     format_project_indicator = lambda exercise: ""  # type: ignore[assignment]
     HAS_TEXTUAL = False
@@ -300,6 +302,32 @@ class HarnessExerciseListScreen(ExerciseListScreen):
 
     def dismiss(self, result=None) -> None:  # type: ignore[override]
         self.dismissed = result
+
+
+@unittest.skipUnless(HAS_TEXTUAL, "Textual is not installed")
+class WritingTextAreaTests(unittest.TestCase):
+    def test_double_space_replaces_previous_space_with_period_space(self) -> None:
+        editor = WritingTextArea("hello ")
+        editor.cursor_location = (0, 6)
+
+        replaced = editor._replace_previous_space_with_period()
+
+        self.assertTrue(replaced)
+        self.assertEqual(editor.text, "hello. ")
+
+    def test_double_space_rule_skips_existing_sentence_punctuation(self) -> None:
+        editor = WritingTextArea("hello. ")
+        editor.cursor_location = (0, 7)
+
+        replaced = editor._replace_previous_space_with_period()
+
+        self.assertFalse(replaced)
+        self.assertEqual(editor.text, "hello. ")
+
+    def test_editor_uses_indent_tab_behavior(self) -> None:
+        editor = WritingTextArea()
+
+        self.assertEqual(editor.tab_behavior, "indent")
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual is not installed")
