@@ -15,6 +15,7 @@ try:
         ExerciseListScreen,
         FooterControl,
         GBTWApp,
+        ProfilePickerResult,
         format_footer_control_label,
         format_project_indicator,
     )
@@ -24,6 +25,7 @@ except ModuleNotFoundError:
     ExerciseListScreen = object  # type: ignore[assignment]
     FooterControl = object  # type: ignore[assignment]
     GBTWApp = object  # type: ignore[assignment]
+    ProfilePickerResult = object  # type: ignore[assignment]
     format_footer_control_label = lambda *args, **kwargs: None  # type: ignore[assignment]
     format_project_indicator = lambda exercise: ""  # type: ignore[assignment]
     HAS_TEXTUAL = False
@@ -130,6 +132,7 @@ class HarnessApp(GBTWApp):
             "#mode-freewrite": FakeFooterControl("Write"),
             "#mode-exercise": FakeFooterControl("Exercise"),
             "#mode-project": FakeFooterControl("Project"),
+            "#show-profiles": FakeFooterControl("Profiles"),
         }
         self.focus_target: str | None = None
         self.markdown_text = ""
@@ -355,7 +358,7 @@ Body
             )
             default_profile = store.list_profiles()[0]
             app = HarnessApp(profile_store=store, content_root=root)
-            app.screen_results = [default_profile]
+            app.screen_results = [ProfilePickerResult("open", default_profile.profile_id)]
 
             await app.on_mount()
             await app.wait_for_workers()
@@ -391,9 +394,9 @@ Body
             )
             app = HarnessApp(profile_store=store, content_root=root)
             app.screen_results = [
-                "__new__",
+                ProfilePickerResult("new"),
                 "Alice",
-                lambda: store.get_profile("alice"),
+                ProfilePickerResult("open", "alice"),
             ]
 
             await app.on_mount()
@@ -405,6 +408,97 @@ Body
             self.assertEqual(app.current_profile.profile_id, "alice")
             self.assertEqual(store.list_profiles()[0].profile_id, "alice")
             assert app.database is not None
+            app.database.close()
+
+    async def test_action_show_profiles_can_rename_current_profile(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "a.md").write_text(
+                """---
+title: A
+part: 1
+module: M
+type: exercise
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            store = ProfileStore(
+                Path(tmp) / "profiles.json",
+                legacy_db_path=Path(tmp) / "legacy.db",
+                profiles_dir=Path(tmp) / "profiles",
+            )
+            default_profile = store.list_profiles()[0]
+            app = HarnessApp(profile_store=store, content_root=root)
+            app.screen_results = [ProfilePickerResult("open", default_profile.profile_id)]
+
+            await app.on_mount()
+            await app.wait_for_workers()
+
+            app.screen_results = [
+                ProfilePickerResult("rename", "default"),
+                "Family",
+                None,
+            ]
+
+            await app.action_show_profiles()
+
+            self.assertIsNotNone(app.current_profile)
+            assert app.current_profile is not None
+            self.assertEqual(app.current_profile.display_name, "Family")
+            self.assertEqual(store.get_profile("default").display_name, "Family")
+            assert app.database is not None
+            app.database.close()
+
+    async def test_action_show_profiles_switches_database_after_saving_current_work(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "content"
+            (root / "part1").mkdir(parents=True)
+            (root / "part1" / "a.md").write_text(
+                """---
+title: A
+part: 1
+module: M
+type: exercise
+---
+
+Body
+""",
+                encoding="utf-8",
+            )
+            store = ProfileStore(
+                Path(tmp) / "profiles.json",
+                legacy_db_path=Path(tmp) / "legacy.db",
+                profiles_dir=Path(tmp) / "profiles",
+            )
+            alice = store.create_profile("Alice")
+            bob = store.create_profile("Bob")
+            app = HarnessApp(profile_store=store, content_root=root)
+            app.screen_results = [ProfilePickerResult("open", alice.profile_id)]
+
+            await app.on_mount()
+            await app.wait_for_workers()
+
+            await app._open_exercise_by_id("part1/a.md", save_current=False)
+            app.editor.text = "alice draft"
+            app._set_save_indicator("Unsaved •", "unsaved")
+
+            app.screen_results = [ProfilePickerResult("open", bob.profile_id)]
+            await app.action_show_profiles()
+
+            old_db = Database(alice.db_path)
+            self.assertEqual(old_db.get_latest_entry("part1/a.md", "freewrite").content, "alice draft")
+            old_db.close()
+
+            self.assertIsNotNone(app.current_profile)
+            assert app.current_profile is not None
+            self.assertEqual(app.current_profile.profile_id, "bob")
+            self.assertEqual(app.editor.text, "")
+            assert app.database is not None
+            self.assertEqual(app.database.get_latest_entry("part1/a.md", "freewrite").content, "")
             app.database.close()
 
     async def test_startup_restore_stays_clean_until_user_types(self) -> None:
