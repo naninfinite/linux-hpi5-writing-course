@@ -15,7 +15,8 @@ except ModuleNotFoundError:  # pragma: no cover - exercised indirectly in this e
 CONTENT_ROOT = Path.home() / "gbtw" / "content"
 PART_DIRECTORIES = ("part1", "part2", "part3", "part4")
 VALID_TYPES = {"exercise", "reading", "long-term"}
-VALID_STATUSES = {"active", "archived", "optional"}
+VALID_STATUSES = {"active", "archived", "optional", "ongoing"}
+VALID_PROJECT_ROLES = {"seed", "contributor", "consolidator"}
 DEFAULT_SAVE_MODE = "session"
 _MARKDOWN_PARSER = MarkdownIt("commonmark")
 _PSEUDO_TABLE_SEPARATOR_RE = re.compile(r"^(\s*-{3,})\s+(-{3,}\s*)$")
@@ -45,10 +46,47 @@ class Exercise:
     project_key: str | None
     project_title: str | None
     project_seed: bool
+    project_role: str | None
 
     @property
     def is_long_term(self) -> bool:
         return self.type == "long-term"
+
+    @property
+    def effective_project_role(self) -> str | None:
+        if self.project_key is None:
+            return None
+        return self.project_role or "contributor"
+
+    @property
+    def source_name(self) -> str:
+        return self.source_path.name
+
+
+@dataclass(slots=True, frozen=True)
+class ProjectContributor:
+    exercise: Exercise
+
+    @property
+    def sort_key(self) -> tuple[int, str, str]:
+        return (self.exercise.part, self.exercise.source_name, self.exercise.exercise_id)
+
+
+@dataclass(slots=True, frozen=True)
+class ProjectGroup:
+    project_key: str
+    contributors: tuple[ProjectContributor, ...]
+    parts: tuple[int, ...]
+    seed: Exercise | None
+    legacy_title: str | None
+
+    @property
+    def contributor_count(self) -> int:
+        return len(self.contributors)
+
+    @property
+    def exercises(self) -> tuple[Exercise, ...]:
+        return tuple(item.exercise for item in self.contributors)
 
 
 @dataclass(slots=True, frozen=True)
@@ -81,6 +119,34 @@ class ContentIndex:
             if exercise.project_seed:
                 return exercise
         return None
+
+    def project_groups(self) -> tuple[ProjectGroup, ...]:
+        grouped: dict[str, list[Exercise]] = {}
+        for exercise in self.exercises:
+            if exercise.project_key is None:
+                continue
+            grouped.setdefault(exercise.project_key, []).append(exercise)
+
+        project_groups: list[ProjectGroup] = []
+        for project_key in sorted(grouped):
+            items = sorted(
+                grouped[project_key],
+                key=lambda item: (item.part, item.source_name, item.exercise_id),
+            )
+            contributors = tuple(ProjectContributor(exercise=item) for item in items)
+            seed = next((item for item in items if item.project_seed), None)
+            legacy_title = next((item.project_title for item in items if item.project_title), None)
+            parts = tuple(sorted({item.part for item in items}))
+            project_groups.append(
+                ProjectGroup(
+                    project_key=project_key,
+                    contributors=contributors,
+                    parts=parts,
+                    seed=seed,
+                    legacy_title=legacy_title,
+                )
+            )
+        return tuple(project_groups)
 
     def first_available(self) -> Exercise | None:
         visible = self.visible_exercises()
@@ -219,6 +285,9 @@ def _load_exercise(markdown_file: Path, content_root: Path) -> Exercise:
     project_key = _optional_string(metadata, "project_key")
     project_title = _optional_string(metadata, "project_title")
     project_seed = _optional_bool(metadata, "project_seed")
+    project_role = _optional_string(metadata, "project_role")
+    if project_role is not None and project_role not in VALID_PROJECT_ROLES:
+        raise ValueError(f"invalid project_role {project_role!r}")
     exercise_id = markdown_file.relative_to(content_root).as_posix()
     normalized_body = _normalize_markdown_content(content)
     return Exercise(
@@ -235,6 +304,7 @@ def _load_exercise(markdown_file: Path, content_root: Path) -> Exercise:
         project_key=project_key,
         project_title=project_title,
         project_seed=project_seed,
+        project_role=project_role,
     )
 
 
@@ -279,57 +349,34 @@ def _optional_bool(metadata: dict[str, object], key: str) -> bool:
 
 def _validate_project_groups(exercises: list[Exercise]) -> tuple[list[Exercise], list[str]]:
     grouped: dict[str, list[Exercise]] = {}
+    replacements: dict[str, Exercise] = {}
+    warnings: list[str] = []
+
     for exercise in exercises:
         if exercise.project_key is None:
+            if exercise.project_seed:
+                warnings.append(
+                    f"{exercise.exercise_id}: project_seed requires project_key; clearing seed flag"
+                )
+                replacements[exercise.exercise_id] = replace(exercise, project_seed=False)
             continue
         grouped.setdefault(exercise.project_key, []).append(exercise)
 
-    warnings: list[str] = []
-    disabled_keys: set[str] = set()
-    replacements: dict[str, Exercise] = {}
-
     for project_key, items in grouped.items():
-        titles = {
-            exercise.project_title
-            for exercise in items
-            if exercise.project_title is not None
-        }
         seeds = [exercise for exercise in items if exercise.project_seed]
-
-        if len(titles) > 1:
-            warnings.append(f"project {project_key!r}: inconsistent project_title values")
-            disabled_keys.add(project_key)
-            continue
         if len(seeds) > 1:
-            warnings.append(f"project {project_key!r}: multiple project_seed documents")
-            disabled_keys.add(project_key)
-            continue
-        if len(items) > 1 and len(seeds) != 1:
-            warnings.append(f"project {project_key!r}: multiple linked documents require exactly one project_seed")
-            disabled_keys.add(project_key)
-            continue
+            warnings.append(
+                f"project {project_key!r}: multiple project_seed documents; clearing seed flags"
+            )
+            for exercise in seeds:
+                current = replacements.get(exercise.exercise_id, exercise)
+                replacements[exercise.exercise_id] = replace(current, project_seed=False)
 
-        canonical_title = next(iter(titles), None)
-        if canonical_title is not None:
-            for exercise in items:
-                if exercise.project_title != canonical_title:
-                    replacements[exercise.exercise_id] = replace(exercise, project_title=canonical_title)
-
-    if not disabled_keys and not replacements:
+    if not replacements:
         return exercises, warnings
 
     validated: list[Exercise] = []
     for exercise in exercises:
-        if exercise.project_key in disabled_keys:
-            validated.append(
-                replace(
-                    exercise,
-                    project_key=None,
-                    project_title=None,
-                    project_seed=False,
-                )
-            )
-            continue
         validated.append(replacements.get(exercise.exercise_id, exercise))
     return validated, warnings
 
