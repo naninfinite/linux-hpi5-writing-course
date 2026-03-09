@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import dataclass
 from datetime import datetime
 
 from rich.markdown import Markdown
@@ -60,6 +61,7 @@ Ctrl+J  start new long-term session now
 Ctrl+E  exercise list
 Ctrl+H  history modal (current section or project)
 Ctrl+T  timed writing sprint modal
+Ctrl+U  profile switcher
 
 Tab     switch focus between panes
 ?       keyboard help
@@ -567,11 +569,18 @@ class ExerciseListScreen(ModalScreen[str | None]):
         )
 
 
-class ProfilePickerScreen(ModalScreen[ProfileRecord | str | None]):
+@dataclass(slots=True, frozen=True)
+class ProfilePickerResult:
+    action: str
+    profile_id: str | None = None
+
+
+class ProfilePickerScreen(ModalScreen[ProfilePickerResult | None]):
     BINDINGS = [
         Binding("enter", "open_selected", "Open", show=False),
         Binding("n", "new_profile", "New", show=False),
-        Binding("escape", "quit_picker", "Quit", show=False),
+        Binding("r", "rename_selected", "Rename", show=False),
+        Binding("escape", "quit_picker", "Close", show=False),
     ]
 
     def __init__(
@@ -581,12 +590,14 @@ class ProfilePickerScreen(ModalScreen[ProfileRecord | str | None]):
         selected_profile_id: str | None = None,
         message: str = "",
         message_style: str = "profile-help",
+        close_label: str = "Close",
     ) -> None:
         super().__init__()
         self.profiles = profiles
         self.selected_profile_id = selected_profile_id
         self.message = message
         self.message_style = message_style
+        self.close_label = close_label
 
     def compose(self) -> ComposeResult:
         with Container(id="profile-picker"):
@@ -610,8 +621,9 @@ class ProfilePickerScreen(ModalScreen[ProfileRecord | str | None]):
             yield OptionList(*options, id="profile-picker-list")
             with Horizontal(id="profile-picker-actions", classes="button-row"):
                 yield Button("Open", id="profile-open")
+                yield Button("Rename", id="profile-rename")
                 yield Button("New Profile", id="profile-new")
-                yield Button("Quit", id="profile-quit")
+                yield Button(self.close_label, id="profile-quit")
 
     def on_mount(self) -> None:
         option_list = self.query_one("#profile-picker-list", OptionList)
@@ -642,10 +654,22 @@ class ProfilePickerScreen(ModalScreen[ProfileRecord | str | None]):
         if selected is None:
             self.app.bell()
             return
-        self.dismiss(selected)
+        self.dismiss(ProfilePickerResult("open", selected.profile_id))
 
     def action_new_profile(self) -> None:
-        self.dismiss("__new__")
+        self.dismiss(ProfilePickerResult("new"))
+
+    def action_rename_selected(self) -> None:
+        option_list = self.query_one("#profile-picker-list", OptionList)
+        if not self.profiles:
+            self.app.bell()
+            return
+        highlighted = option_list.highlighted
+        if highlighted is None:
+            highlighted = 0
+        selected_index = max(0, min(highlighted, len(self.profiles) - 1))
+        selected = self.profiles[selected_index]
+        self.dismiss(ProfilePickerResult("rename", selected.profile_id))
 
     def action_quit_picker(self) -> None:
         self.dismiss(None)
@@ -657,6 +681,8 @@ class ProfilePickerScreen(ModalScreen[ProfileRecord | str | None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "profile-open":
             self.action_open_selected()
+        elif event.button.id == "profile-rename":
+            self.action_rename_selected()
         elif event.button.id == "profile-new":
             self.action_new_profile()
         elif event.button.id == "profile-quit":
@@ -1199,6 +1225,7 @@ class GBTWApp(App[None]):
         Binding("ctrl+e", "show_exercise_list", "Exercises", show=False),
         Binding("ctrl+h", "show_history", "History", show=False),
         Binding("ctrl+t", "show_sprint", "Sprint", show=False),
+        Binding("ctrl+u", "show_profiles", "Profiles", show=False),
         Binding("tab", "toggle_focus", "Focus", show=False),
         Binding("ctrl+q", "quit_app", "Quit", show=False),
     ]
@@ -1283,6 +1310,7 @@ class GBTWApp(App[None]):
                 yield FooterControl("Project", control_id="mode-project")
                 yield Static("|")
                 yield FooterControl("Exercises", control_id="show-exercises")
+                yield FooterControl("Profiles", control_id="show-profiles")
                 yield FooterControl("<", control_id="previous-exercise")
                 yield FooterControl(">", control_id="next-exercise")
                 yield FooterControl("?", control_id="help-button")
@@ -1299,47 +1327,13 @@ class GBTWApp(App[None]):
         await self._initialize_after_database_ready()
 
     async def _select_profile_and_start(self) -> None:
-        error_message = ""
-        selected_profile_id: str | None = None
         while self.database is None:
-            try:
-                profiles = self.profile_store.list_profiles()
-            except ProfileRegistryError as exc:
-                await self.push_screen_wait(
-                    BlockingMessageScreen(
-                        "Profile Registry Error",
-                        str(exc),
-                    )
-                )
+            selected = await self._run_profile_picker(close_label="Quit")
+            if selected is None:
                 self.exit()
                 return
-            choice = await self.push_screen_wait(
-                ProfilePickerScreen(
-                    profiles,
-                    selected_profile_id=selected_profile_id,
-                    message=error_message,
-                    message_style="profile-error" if error_message else "profile-help",
-                )
-            )
-            error_message = ""
-            if choice is None:
-                self.exit()
-                return
-            if choice == "__new__":
-                new_name = await self.push_screen_wait(NewItemScreen("New profile name"))
-                if new_name is None:
-                    continue
-                try:
-                    created = self.profile_store.create_profile(new_name)
-                except ProfileValidationError as exc:
-                    self.bell()
-                    error_message = str(exc)
-                    continue
-                selected_profile_id = created.profile_id
-                continue
-            if isinstance(choice, ProfileRecord):
-                self._open_selected_profile(choice)
-                break
+            self._open_selected_profile(selected)
+            break
         if self.database is None:
             return
         await self._initialize_after_database_ready()
@@ -1357,6 +1351,75 @@ class GBTWApp(App[None]):
         self.database = Database(refreshed_profile.db_path)
         self._sync_database_projects()
         self._refresh_sub_title()
+
+    async def _run_profile_picker(self, *, close_label: str) -> ProfileRecord | None:
+        error_message = ""
+        selected_profile_id = self.current_profile.profile_id if self.current_profile is not None else None
+        while True:
+            try:
+                profiles = self.profile_store.list_profiles()
+            except ProfileRegistryError as exc:
+                await self.push_screen_wait(
+                    BlockingMessageScreen(
+                        "Profile Registry Error",
+                        str(exc),
+                    )
+                )
+                return None
+            choice = await self.push_screen_wait(
+                ProfilePickerScreen(
+                    profiles,
+                    selected_profile_id=selected_profile_id,
+                    message=error_message,
+                    message_style="profile-error" if error_message else "profile-help",
+                    close_label=close_label,
+                )
+            )
+            error_message = ""
+            if choice is None:
+                return None
+            if choice.action == "new":
+                new_name = await self.push_screen_wait(NewItemScreen("New profile name"))
+                if new_name is None:
+                    continue
+                try:
+                    created = self.profile_store.create_profile(new_name)
+                except ProfileValidationError as exc:
+                    self.bell()
+                    error_message = str(exc)
+                    continue
+                selected_profile_id = created.profile_id
+                continue
+            if choice.action == "rename":
+                if choice.profile_id is None:
+                    self.bell()
+                    continue
+                current = self.profile_store.get_profile(choice.profile_id)
+                if current is None:
+                    self.bell()
+                    error_message = "That profile no longer exists."
+                    continue
+                new_name = await self.push_screen_wait(NewItemScreen(f"Rename profile: {current.display_name}"))
+                if new_name is None:
+                    continue
+                try:
+                    renamed = self.profile_store.rename_profile(choice.profile_id, new_name)
+                except ProfileValidationError as exc:
+                    self.bell()
+                    error_message = str(exc)
+                    continue
+                selected_profile_id = renamed.profile_id
+                if self.current_profile is not None and renamed.profile_id == self.current_profile.profile_id:
+                    self.current_profile = renamed
+                    self._refresh_sub_title()
+                continue
+            if choice.action == "open" and choice.profile_id is not None:
+                selected = self.profile_store.get_profile(choice.profile_id)
+                if selected is None:
+                    self.bell()
+                    error_message = "That profile no longer exists."
+                    continue
+                return selected
 
     def _sync_database_projects(self) -> None:
         if self.database is None:
@@ -1459,6 +1522,18 @@ class GBTWApp(App[None]):
             callback=self._on_exercise_list_closed,
         )
 
+    async def action_show_profiles(self) -> None:
+        selected = await self._run_profile_picker(close_label="Close")
+        if selected is None:
+            return
+        if self.current_profile is not None and selected.profile_id == self.current_profile.profile_id:
+            refreshed = self.profile_store.get_profile(selected.profile_id)
+            if refreshed is not None:
+                self.current_profile = refreshed
+                self._refresh_sub_title()
+            return
+        await self._switch_to_profile(selected)
+
     async def action_show_history(self) -> None:
         if self.current_exercise is None:
             self.bell()
@@ -1527,6 +1602,44 @@ class GBTWApp(App[None]):
             self.database.close()
             self.database = None
 
+    async def _switch_to_profile(self, profile: ProfileRecord) -> None:
+        if self._effective_layout_mode() == "project" and self._project_doc_dirty:
+            await self._save_project_doc("switch")
+        if self._is_dirty():
+            await self._save_current_entry("switch")
+        if self.database is not None:
+            self.database.close()
+            self.database = None
+        self._reset_runtime_state_for_profile_switch()
+        self._open_selected_profile(profile)
+        await self._initialize_after_database_ready()
+
+    def _reset_runtime_state_for_profile_switch(self) -> None:
+        self.current_exercise = None
+        self.current_entry_id = None
+        self.current_layout_mode = "side"
+        self.side_ratio_index = 1
+        self.active_project_key = None
+        self.current_project_doc_id = None
+        self._project_tree_expanded = {}
+        self._project_doc_dirty = False
+        self._project_doc_autosave_gen = 0
+        self._project_doc_save_gen = 0
+        self._loading_project_doc = False
+        self._last_deleted_freewrite = None
+        self._loading_editor = False
+        self._ignored_loaded_text = None
+        self._save_generation = 0
+        self._autosave_generation = 0
+        self._suppress_autosave = False
+        self._sprint_seconds_remaining = 0
+        self._using_markdown_fallback = False
+        if self._sprint_timer is not None:
+            self._sprint_timer.stop()
+            self._sprint_timer = None
+        self._save_indicator_state = "saved"
+        self._last_save_message = "Saved ✓"
+
     def _content_project_titles(self) -> dict[str, str]:
         titles: dict[str, str] = {}
         for group in self.content_index.project_groups():
@@ -1578,6 +1691,8 @@ class GBTWApp(App[None]):
             await self.action_set_mode("project")
         elif control_id == "show-exercises":
             await self.action_show_exercise_list()
+        elif control_id == "show-profiles":
+            await self.action_show_profiles()
         elif control_id == "previous-exercise":
             await self.action_previous_exercise()
         elif control_id == "next-exercise":
