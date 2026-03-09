@@ -4,6 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Iterable
 
 from .content import Exercise
 
@@ -29,6 +30,15 @@ class ProjectEntryRecord:
     created_at: datetime
     updated_at: datetime
     content: str
+
+
+@dataclass(slots=True, frozen=True)
+class ProjectRecord:
+    project_key: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    notes: str
 
 
 class Database:
@@ -66,6 +76,14 @@ class Database:
               updated_at TIMESTAMP NOT NULL,
               content TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS projects(
+              project_key TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              created_at TIMESTAMP NOT NULL,
+              updated_at TIMESTAMP NOT NULL,
+              notes TEXT NOT NULL DEFAULT ''
+            );
             """
         )
         entry_columns = {
@@ -96,6 +114,12 @@ class Database:
             ON project_entries(project_key, updated_at, id)
             """
         )
+        self.connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_projects_title_key
+            ON projects(title, project_key)
+            """
+        )
         self.connection.commit()
 
     def get_preference(self, key: str) -> str | None:
@@ -115,6 +139,58 @@ class Database:
             (key, value),
         )
         self.connection.commit()
+
+    def sync_projects(
+        self,
+        project_keys: Iterable[str],
+        *,
+        now: datetime | None = None,
+    ) -> list[ProjectRecord]:
+        timestamp = _normalize_datetime(now)
+        keys = sorted({key for key in project_keys if key})
+        if not keys:
+            return []
+        existing = {
+            str(row["project_key"])
+            for row in self.connection.execute(
+                "SELECT project_key FROM projects WHERE project_key IN (%s)"
+                % ", ".join("?" for _ in keys),
+                tuple(keys),
+            ).fetchall()
+        }
+        missing = [key for key in keys if key not in existing]
+        for key in missing:
+            self.connection.execute(
+                """
+                INSERT INTO projects(project_key, title, created_at, updated_at, notes)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (key, key, timestamp.isoformat(), timestamp.isoformat(), ""),
+            )
+        if missing:
+            self.connection.commit()
+        return [record for record in self.list_projects() if record.project_key in set(keys)]
+
+    def get_project(self, project_key: str) -> ProjectRecord | None:
+        row = self.connection.execute(
+            """
+            SELECT project_key, title, created_at, updated_at, notes
+            FROM projects
+            WHERE project_key = ?
+            """,
+            (project_key,),
+        ).fetchone()
+        return None if row is None else _row_to_project(row)
+
+    def list_projects(self) -> list[ProjectRecord]:
+        rows = self.connection.execute(
+            """
+            SELECT project_key, title, created_at, updated_at, notes
+            FROM projects
+            ORDER BY lower(title), lower(project_key)
+            """
+        ).fetchall()
+        return [_row_to_project(row) for row in rows]
 
     def resolve_entry_for_exercise(
         self,
@@ -257,6 +333,7 @@ class Database:
     ) -> ProjectEntryRecord:
         created_at = _normalize_datetime(now)
         effective_updated_at = _normalize_datetime(updated_at or created_at)
+        self._touch_project(project_key, now=effective_updated_at)
         cursor = self.connection.execute(
             """
             INSERT INTO project_entries(project_key, created_at, updated_at, content)
@@ -275,6 +352,13 @@ class Database:
         now: datetime | None = None,
     ) -> ProjectEntryRecord:
         updated_at = _normalize_datetime(now)
+        row = self.connection.execute(
+            "SELECT project_key FROM project_entries WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"project entry {entry_id} not found")
+        self._touch_project(str(row["project_key"]), now=updated_at)
         self.connection.execute(
             "UPDATE project_entries SET content = ?, updated_at = ? WHERE id = ?",
             (content, updated_at.isoformat(), entry_id),
@@ -335,6 +419,24 @@ class Database:
             )
         return self.list_project_history(project_key) if created else []
 
+    def _touch_project(self, project_key: str, *, now: datetime | None = None) -> None:
+        updated_at = _normalize_datetime(now)
+        self.connection.execute(
+            """
+            INSERT INTO projects(project_key, title, created_at, updated_at, notes)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(project_key) DO UPDATE SET updated_at = excluded.updated_at
+            """,
+            (
+                project_key,
+                project_key,
+                updated_at.isoformat(),
+                updated_at.isoformat(),
+                "",
+            ),
+        )
+        self.connection.commit()
+
 
 def _normalize_datetime(value: datetime | None) -> datetime:
     if value is None:
@@ -362,4 +464,14 @@ def _row_to_project_entry(row: sqlite3.Row) -> ProjectEntryRecord:
         created_at=datetime.fromisoformat(str(row["created_at"])),
         updated_at=datetime.fromisoformat(str(row["updated_at"])),
         content=str(row["content"]),
+    )
+
+
+def _row_to_project(row: sqlite3.Row) -> ProjectRecord:
+    return ProjectRecord(
+        project_key=str(row["project_key"]),
+        title=str(row["title"]),
+        created_at=datetime.fromisoformat(str(row["created_at"])),
+        updated_at=datetime.fromisoformat(str(row["updated_at"])),
+        notes=str(row["notes"]),
     )
